@@ -70,6 +70,9 @@ class GameState(BaseModel):
     to_call: float = Field(default=0, ge=0, description="Сколько нужно доставить")
     stack: float = Field(default=100, gt=0, description="Эффективный стек, оставшийся у героя")
     hero_invested: float = Field(default=0, ge=0, description="Сколько герой уже вложил на этой улице")
+    history: list[tuple[str, str, str]] = Field(
+        default_factory=list,
+        description="Постфлоп-действия по порядку: (улица flop/turn/river, hero/villain, check/bet/raise/call)")
 
     @field_validator("hero_cards", "board", mode="before")
     @classmethod
