@@ -71,6 +71,7 @@ def outs(hero, board) -> dict[str, list[str]]:
     cur = _rank(hero + board)
     hero_ranks = {c.rank for c in hero}
     top_board = max(c.rank for c in board)
+    board_paired = len({c.rank for c in board}) < len(board)
     res: dict[str, list[str]] = {}
     for card in eval7.Deck().cards:
         if card in hero or card in board:
@@ -83,6 +84,8 @@ def outs(hero, board) -> dict[str, list[str]]:
             continue
         if name == "Pair" and card.rank < top_board:
             continue
+        if name == "Two Pair" and board_paired and card.rank < top_board:
+            continue          # «две пары» за счёт пары на борде — слабое усиление, аутом не считаем
         res.setdefault(OUT_RU[name], []).append(str(card))
     return res
 
