@@ -44,18 +44,24 @@ def villain_range(state: GameState) -> VillainRange | None:
     vr = VillainRange(combos, label, charts.range_percent(rng_str))
     if board and state.to_call > 0:
         vr.combos = _narrow_after_bet(combos, board)
-        vr.label += ", после ставки оставлены сильные руки и дро"
+        vr.label += ", после ставки оставлены сильные руки, дро и часть блефов"
         vr.narrowed = True
     return vr
 
 
-def _narrow_after_bet(combos, board, keep: float = 0.5):
-    """Оппонент поставил: оставляем верхнюю половину готовых рук и сильные дро (8+ аутов)."""
+def _narrow_after_bet(combos, board, keep: float = 0.5, bluffs: float = 0.12):
+    """Оппонент поставил: верхняя половина готовых рук, сильные дро (8+ аутов) и немного блефов.
+
+    Блефы — самые слабые руки диапазона (с ними нет смысла чекать до вскрытия).
+    """
     ranked = sorted(combos, key=lambda c: eval7.evaluate(list(c) + board), reverse=True)
     n = max(1, int(len(ranked) * keep))
-    kept = ranked[:n]
+    kept, rest = ranked[:n], ranked[n:]
+    k = int(len(ranked) * bluffs)
+    if k:
+        kept, rest = kept + rest[-k:], rest[:-k]
     if len(board) < 5:
-        kept += [c for c in ranked[n:] if calc.count_outs(calc.outs(list(c), board)) >= 8]
+        kept += [c for c in rest if calc.count_outs(calc.outs(list(c), board)) >= 8]
     return kept
 
 
