@@ -101,3 +101,18 @@ def pot_odds(pot: float, to_call: float) -> float:
 
 def spr(stack: float, pot: float) -> float:
     return stack / pot
+
+
+def is_weak_showdown(cards, board) -> bool:
+    """Рука, с которой ставка на ривере была блефом: без пары либо пара ниже второй карты борда."""
+    kind = eval7.handtype(eval7.evaluate(cards + board))
+    if kind == "High Card":
+        return True
+    if kind != "Pair":
+        return False
+    board_ranks = sorted(c.rank for c in board)
+    if len(set(board_ranks)) < len(board_ranks):
+        return True                                   # пара лежит на борде
+    mine = [c.rank for c in cards]
+    pair_rank = mine[0] if mine[0] == mine[1] else next(r for r in mine if r in board_ranks)
+    return pair_rank < board_ranks[-2]

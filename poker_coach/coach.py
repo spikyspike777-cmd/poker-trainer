@@ -69,7 +69,10 @@ def analyze(state: GameState) -> Analysis:
         a.hand = calc.hand_name(hero, board)
         a.outs = calc.outs(hero, board)
         _postflop(state, a)
-        if SOLVER is not None and state.hero_invested == 0:
+        adj = state.villain_adj
+        if adj is not None and adj.exploit:
+            _exploit(state, a, adj)          # солвер считает оппонента равновесным — тут он не подходит
+        elif SOLVER is not None and state.hero_invested == 0:
             _solve(state, a, hero, board)
     else:
         _preflop(state, a)
@@ -192,6 +195,30 @@ def _postflop(s: GameState, a: Analysis) -> None:
                              "Рука слабая против его диапазона — чек, не вкладываем фишки.")
     a.reasons.append(f"Вы {pos}; SPR (стек к банку) = {a.spr:.1f}"
                      + (" — стеки мелкие, любая крупная ставка ведёт к олл-ину." if a.spr < 3 else "."))
+
+
+def _exploit(s: GameState, a: Analysis, adj) -> None:
+    """Поправить эвристический совет под отклонения конкретного оппонента."""
+    a.reasons.insert(0, f"Профиль оппонента за {adj.hands} раздач — {adj.label}: " + "; ".join(adj.notes) + ".")
+    a.source += f"; с поправкой на профиль оппонента ({adj.hands} раздач)"
+    ftb, eq = adj.fold_to_bet, a.equity
+    if s.to_call > 0 or ftb is None:
+        return
+    river = s.street == "river"
+    if ftb >= 0.42 and a.action == "check" and eq < 0.5:
+        _bet(s, a, 0.5)
+        a.reasons.append(f"Блеф: сама рука слабая, но он сбрасывает на ставку примерно в {ftb:.0%} случаев. "
+                         f"Ставке в полбанка достаточно срабатывать в 33% случаев.")
+    elif ftb <= 0.14:
+        if a.action in ("bet", "allin") and eq < 0.5:
+            a.action, a.amount, a.sizing = "check", None, ""
+            a.reasons.append(f"Без блефа: он сбрасывает на ставку всего в {ftb:.0%} случаев, "
+                             "поэтому ставить стоит только с рукой, которая выигрывает на вскрытии.")
+        elif eq >= 0.55 and (a.action == "check" or (a.action == "bet" and a.sizing != "75% банка")):
+            _bet(s, a, 0.75)
+            a.reasons.append("Крупная ставка для велью: он коллирует слишком широко, "
+                             "поэтому добираем больше даже со средними по силе руками"
+                             + (" — на ривере это особенно выгодно." if river else "."))
 
 
 def _mix_label(kind: str, amount: float | None, pot: float) -> str:

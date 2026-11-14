@@ -6,6 +6,8 @@ from enum import Enum
 import eval7
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .profile import Adjust
+
 POSITIONS = ["UTG", "HJ", "CO", "BTN", "SB", "BB"]
 # Порядок хода на постфлопе: кто правее, тот в позиции.
 POSTFLOP_ORDER = ["SB", "BB", "UTG", "HJ", "CO", "BTN"]
@@ -73,6 +75,8 @@ class GameState(BaseModel):
     history: list[tuple[str, str, str]] = Field(
         default_factory=list,
         description="Постфлоп-действия по порядку: (улица flop/turn/river, hero/villain, check/bet/raise/call)")
+
+    villain_adj: Adjust | None = Field(default=None, description="Поправки на профиль оппонента")
 
     @field_validator("hero_cards", "board", mode="before")
     @classmethod
