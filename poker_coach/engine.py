@@ -77,6 +77,7 @@ class Game:
         self.final_pot = 0.0
         self.result = ""
         self.net = 0.0
+        self.history: list[tuple[str, str, str]] = []     # (улица, игрок, действие) на постфлопе
         self.log: list[str] = [f"Вы на {self.pos[H]}, оппонент на {self.pos[V]}. Остальные сбросили."]
         self.decisions: list[Decision] = []
         self.last: Decision | None = None
@@ -116,7 +117,8 @@ class Game:
             hero_cards=self.cards[p], board=self.board, hero_pos=self.pos[p],
             villain_pos=None if unopened else self.pos[o], preflop_line=line, pot=self.pot,
             to_call=0 if unopened else max(0.0, round(self.inv[o] - self.inv[p], 2)), stack=self.stack[p],
-            hero_invested=0 if self.street == "preflop" else self.inv[p])
+            hero_invested=0 if self.street == "preflop" else self.inv[p],
+            history=[(st, "hero" if who == p else "villain", k) for st, who, k in self.history])
 
     def advice(self, p: str = H) -> Analysis:
         st, o = self.state(p), self._other(p)
@@ -210,6 +212,9 @@ class Game:
             self.log.append(f"{pre}: {who} — фолд.")
             self._finish(winner=o)
             return
+        if self.street != "preflop" and kind != "fold":
+            first_bet = self.inv[o] == 0 and self.inv[p] == 0
+            self.history.append((self.street, p, "bet" if kind == "raise" and first_bet else kind))
         if kind == "check":
             self.log.append(f"{pre}: {who} — чек.")
             if self.checked:

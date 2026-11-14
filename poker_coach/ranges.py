@@ -35,24 +35,58 @@ def _start(state: GameState) -> tuple[str, str] | None:
     return charts.vs_3bet_ranges(v)[1], f"колл 3-бета с {v}"
 
 
+_HERO_LINE_RANGE = {
+    L.HERO_OPEN_VILLAIN_CALL: lambda h, v: charts.RFI.get(h, charts.RFI["BTN"]),
+    L.VILLAIN_OPEN_HERO_CALL: lambda h, v: charts.vs_open_ranges(h, v)[1] or _SB_CALL_FALLBACK,
+    L.HERO_3BET_VILLAIN_CALL: lambda h, v: charts.vs_open_ranges(h, v)[0],
+    L.VILLAIN_3BET_HERO_CALL: lambda h, v: charts.vs_3bet_ranges(h)[1],
+}
+_STREET_CARDS = {"flop": 3, "turn": 4, "river": 5}
+# Какую часть диапазона (сверху по силе) игрок оставляет при действии и сколько добавляет блефов снизу.
+NARROW = {"bet": (0.50, 0.12), "raise": (0.30, 0.08), "call": (0.60, 0.0)}
+CHECK_BACK_DROP = 0.25      # чек в позиции: убираем верх диапазона (сильные руки обычно ставят)
+
+
+def narrow(combos, board, kind: str, in_position: bool):
+    """Сузить диапазон после одного действия игрока на борде `board` (эвристика)."""
+    if len(combos) < 4:
+        return combos
+    ranked = sorted(combos, key=lambda c: eval7.evaluate(list(c) + board), reverse=True)
+    if kind == "check":
+        return ranked[int(len(ranked) * CHECK_BACK_DROP):] if in_position else ranked
+    keep, bluffs = NARROW[kind]
+    n = max(1, int(len(ranked) * keep))
+    kept, rest = ranked[:n], ranked[n:]
+    k = int(len(ranked) * bluffs)
+    if k:
+        kept, rest = kept + rest[-k:], rest[:-k]
+    if len(board) < 5:
+        need = 4 if kind == "call" else 8          # колл — любые дро, ставка — сильные дро
+        kept += [c for c in rest if calc.count_outs(calc.outs(list(c), board)) >= need]
+    return kept
+
+
+def _through_history(combos, state: GameState, who: str, in_position: bool, include_current: bool):
+    board = to_eval7(state.board)
+    for street, actor, kind in state.history:
+        if actor != who or (street == state.street and not include_current):
+            continue
+        combos = narrow(combos, board[:_STREET_CARDS[street]], kind, in_position)
+    return combos
+
+
 def hero_range(state: GameState) -> list[calc.Combo]:
-    """Диапазон, с которым герой по чартам приходит на постфлоп (нужен солверу)."""
-    h, v, line = state.hero_pos, state.villain_pos, state.preflop_line
-    if line == L.HERO_OPEN_VILLAIN_CALL:
-        rng = charts.RFI.get(h, charts.RFI["BTN"])
-    elif line == L.VILLAIN_OPEN_HERO_CALL:
-        rng = charts.vs_open_ranges(h, v)[1] or _SB_CALL_FALLBACK
-    elif line == L.HERO_3BET_VILLAIN_CALL:
-        rng = charts.vs_open_ranges(h, v)[0]
-    else:
-        rng = charts.vs_3bet_ranges(h)[1]
-    return calc.live_combos(charts.combos(rng), to_eval7(state.board))
+    """Диапазон героя на начало текущей улицы (нужен солверу): чарты + сужение по его действиям."""
+    rng = _HERO_LINE_RANGE[state.preflop_line](state.hero_pos, state.villain_pos)
+    combos = calc.live_combos(charts.combos(rng), to_eval7(state.board))
+    return _through_history(combos, state, "hero", state.in_position, include_current=False)
 
 
 def villain_start(state: GameState) -> list[calc.Combo]:
-    """Диапазон оппонента по префлоп-линии, без сужения по ставкам."""
+    """Диапазон оппонента на начало текущей улицы: префлоп-линия + действия на прошлых улицах."""
     rng_str, _ = _start(state)
-    return calc.live_combos(charts.combos(rng_str), to_eval7(state.hero_cards) + to_eval7(state.board))
+    combos = calc.live_combos(charts.combos(rng_str), to_eval7(state.hero_cards) + to_eval7(state.board))
+    return _through_history(combos, state, "villain", not state.in_position, include_current=False)
 
 
 def villain_range(state: GameState) -> VillainRange | None:
@@ -63,27 +97,18 @@ def villain_range(state: GameState) -> VillainRange | None:
     hero, board = to_eval7(state.hero_cards), to_eval7(state.board)
     combos = calc.live_combos(charts.combos(rng_str), hero + board)
     vr = VillainRange(combos, label, charts.range_percent(rng_str))
-    if board and state.to_call > 0:
-        vr.combos = _narrow_after_bet(combos, board)
+    if not board:
+        return vr
+    if state.history:
+        vr.combos = _through_history(combos, state, "villain", not state.in_position, include_current=True)
+        if len(vr.combos) < len(combos):
+            vr.label += ", сужен по его действиям на постфлопе"
+            vr.narrowed = True
+    elif state.to_call > 0:
+        vr.combos = narrow(combos, board, "bet", not state.in_position)
         vr.label += ", после ставки оставлены сильные руки, дро и часть блефов"
         vr.narrowed = True
     return vr
-
-
-def _narrow_after_bet(combos, board, keep: float = 0.5, bluffs: float = 0.12):
-    """Оппонент поставил: верхняя половина готовых рук, сильные дро (8+ аутов) и немного блефов.
-
-    Блефы — самые слабые руки диапазона (с ними нет смысла чекать до вскрытия).
-    """
-    ranked = sorted(combos, key=lambda c: eval7.evaluate(list(c) + board), reverse=True)
-    n = max(1, int(len(ranked) * keep))
-    kept, rest = ranked[:n], ranked[n:]
-    k = int(len(ranked) * bluffs)
-    if k:
-        kept, rest = kept + rest[-k:], rest[:-k]
-    if len(board) < 5:
-        kept += [c for c in rest if calc.count_outs(calc.outs(list(c), board)) >= 8]
-    return kept
 
 
 def matrix(vr: VillainRange | None) -> dict[str, float]:
