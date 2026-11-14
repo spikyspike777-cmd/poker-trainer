@@ -10,7 +10,8 @@ from dataclasses import dataclass
 
 import eval7
 
-from . import calc, charts
+from . import bots, calc, charts
+from .profile import PlayerStats
 from .coach import Analysis, analyze, matches
 from .state import POSITIONS, POSTFLOP_ORDER, RANKS, SUITS, GameState, PreflopLine as L, to_eval7
 
@@ -40,8 +41,16 @@ def _group(kind: str) -> str:
 
 
 class Game:
-    def __init__(self, rng: random.Random | None = None):
+    def __init__(self, rng: random.Random | None = None, style: str = "standard", use_profile: bool = True):
         self.rng = rng or random.Random()
+        self.style = bots.STYLES[style]
+        self.use_profile = use_profile          # учитывает ли тренер накопленный профиль оппонента
+        self.stats = PlayerStats()              # что герой успел увидеть за оппонентом
+        self.new_hand()
+
+    def set_style(self, style: str) -> None:
+        self.style = bots.STYLES[style]
+        self.stats = PlayerStats()
         self.new_hand()
 
     # ---------- раздача ----------
@@ -110,6 +119,19 @@ class Game:
         # банк с 4-бетом: приближаем диапазонами 3-бет-банка
         return L.VILLAIN_3BET_HERO_CALL if opened else L.HERO_3BET_VILLAIN_CALL
 
+    def _expected_continue(self) -> float:
+        """Как часто стандартный игрок продолжил бы на месте оппонента (доля его диапазона)."""
+        vp, hp, pct = self.pos[V], self.pos[H], charts.range_percent
+        if self.raises == 1:
+            a, b = charts.vs_open_ranges(vp, hp)
+            return (pct(a) + pct(b)) / 100
+        if self.raises == 2:
+            a, b = charts.vs_3bet_ranges(vp)
+            return min(1.0, (pct(a) + pct(b)) / pct(charts.RFI.get(vp, charts.RFI["BTN"])))
+        if self.raises == 3:
+            return min(1.0, (pct(charts.VS_4BET[0]) + pct(charts.VS_4BET[1])) / pct(charts.vs_open_ranges(vp, hp)[0]))
+        return 0.5
+
     def state(self, p: str = H) -> GameState:
         o, line = self._other(p), self._line(p)
         unopened = line == L.UNOPENED
@@ -118,7 +140,8 @@ class Game:
             villain_pos=None if unopened else self.pos[o], preflop_line=line, pot=self.pot,
             to_call=0 if unopened else max(0.0, round(self.inv[o] - self.inv[p], 2)), stack=self.stack[p],
             hero_invested=0 if self.street == "preflop" else self.inv[p],
-            history=[(st, "hero" if who == p else "villain", k) for st, who, k in self.history])
+            history=[(st, "hero" if who == p else "villain", k) for st, who, k in self.history],
+            villain_adj=self.stats.adjust() if p == H and self.use_profile else None)
 
     def advice(self, p: str = H) -> Analysis:
         st, o = self.state(p), self._other(p)
@@ -186,14 +209,19 @@ class Game:
         while not self.finished and self.to_act == V:
             a = self.advice(V)
             to_call = self.inv[H] - self.inv[V]
-            kind, to = a.action, 0.0
+            allin_to = self.inv[V] + self.stack[V]
+            kind, to, amount = a.action, 0.0, a.amount
             if a.mix:
-                kind, amt, _f, _e = self.rng.choices(a.mix, weights=[m[2] for m in a.mix])[0]
-                a.amount = amt
+                kind, amount, _f, _e = self.rng.choices(a.mix, weights=[m[2] for m in a.mix])[0]
             if kind in ("bet", "raise", "allin"):
-                to = self.inv[V] + self.stack[V] if kind == "allin" else max(a.amount, 2 * self.inv[H])
+                to = allin_to if kind == "allin" else max(amount, 2 * self.inv[H])
                 kind = "raise"
-                if self.stack[H] == 0 or self.stack[V] <= to_call:
+            kind, to = bots.restyle(
+                self.style, self.rng, preflop=self.street == "preflop", kind=kind, to=to, cards=self.cards[V],
+                equity=a.equity, pot=self.pot, cur_bet=self.inv[H], to_call=to_call, raises=self.raises)
+            if kind == "raise":
+                to = min(max(to, 2 * self.inv[H], self.inv[H] + 1), allin_to)
+                if self.stack[H] == 0 or self.stack[V] <= to_call or to <= self.inv[H]:
                     kind = "call"
             if kind == "fold" and to_call <= 0:
                 kind = "check"
@@ -205,6 +233,11 @@ class Game:
 
     def _apply(self, p: str, kind: str, to: float) -> None:
         o, who = self._other(p), "Вы" if p == H else "Оппонент"
+        if p == V:
+            if self.street != "preflop":
+                self.stats.record_postflop("bet" if kind == "raise" else kind, self.inv[H] > self.inv[V])
+            elif self.raises >= 1:
+                self.stats.record_preflop(kind != "fold", kind == "raise", self._expected_continue())
         pre = STREET_RU[self.street]
         if kind == "fold":
             self.log.append(f"{pre}: {who} — фолд.")
@@ -266,6 +299,9 @@ class Game:
         self.log.append(f"Вскрытие: у оппонента {' '.join(self.cards[V])} "
                         f"({calc.hand_name(to_eval7(self.cards[V]), b)}), "
                         f"у вас {calc.hand_name(to_eval7(self.cards[H]), b)}.")
+        last = [k for st, who, k in self.history if st == "river" and who == V]
+        if last and last[-1] in ("bet", "raise"):
+            self.stats.record_showdown(calc.is_weak_showdown(to_eval7(self.cards[V]), b))
         self._finish(winner=H if hv > vv else V if vv > hv else None)
 
     def _finish(self, winner: str | None) -> None:
@@ -278,6 +314,7 @@ class Game:
             self.stack[winner] += pot
         self.net = round(self.stack[H] - 100, 2)
         self.finished = True
+        self.stats.hands += 1
         who = {H: "Вы выиграли банк", V: "Оппонент выиграл банк", None: "Банк поделён"}[winner]
         self.result = f"{who} {pot:g} bb. Ваш итог: {self.net:+g} bb."
         self.log.append(self.result)

@@ -6,8 +6,10 @@ from dataclasses import dataclass, field
 
 from pydantic import ValidationError
 
+from . import calc
 from .coach import Analysis, analyze, matches
-from .state import POSITIONS, GameState, PreflopLine as L
+from .profile import BASE_VPIP, PlayerStats
+from .state import POSITIONS, GameState, PreflopLine as L, to_eval7
 
 _POS_BY_N = {2: ["SB", "BB"], 3: ["SB", "BB", "BTN"], 4: ["SB", "BB", "CO", "BTN"],
              5: ["SB", "BB", "HJ", "CO", "BTN"], 6: ["SB", "BB", "UTG", "HJ", "CO", "BTN"]}
@@ -47,7 +49,9 @@ def split_hands(text: str) -> list[str]:
     return [p.strip() for p in parts if "*** HOLE CARDS ***" in p]
 
 
-def parse_hand(text: str) -> HandReview | None:
+def parse_hand(text: str, profiles: dict[str, PlayerStats] | None = None) -> HandReview | None:
+    """profiles — статистика игроков по прошлым раздачам сессии; пополняется этой раздачей."""
+    profiles = profiles if profiles is not None else {}
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     m = re.search(rf"\({_MONEY}/{_MONEY}", lines[0])
     hero_m = re.search(r"Dealt to (.+?) \[(\w\w) (\w\w)\]", text)
@@ -85,6 +89,8 @@ def parse_hand(text: str) -> HandReview | None:
     pre_callers: list[str] = []                   # коллы и лимпы на префлопе
     history: list[tuple[str, str, str]] = []
     collected = 0.0
+    events: list[tuple[str, str, str, bool]] = []       # (игрок, улица, действие, отвечал ли на ставку)
+    shown: dict[str, list[str]] = {}
 
     def put(player: str, to: float) -> None:
         nonlocal pot
@@ -115,6 +121,10 @@ def parse_hand(text: str) -> HandReview | None:
             if cm.group(1) == hero:
                 collected += _num(cm.group(2)) / bb
             continue
+        sh = re.match(r"(.+?): shows \[(\w\w) (\w\w)\]", ln)
+        if sh and sh.group(1) in inv:
+            shown[sh.group(1)] = [sh.group(2), sh.group(3)]
+            continue
         am = _ACTION.match(ln)
         if not am or am.group(1) not in inv:
             continue
@@ -125,7 +135,10 @@ def parse_hand(text: str) -> HandReview | None:
         if who == hero:
             review.decisions.append(_review(
                 street, kind, verb, amount, to, hero, pos, board, pot, inv, stacks, active,
-                pre_raises, pre_callers, history, review.hero_cards))
+                pre_raises, pre_callers, history, review.hero_cards, profiles))
+        else:
+            events.append((who, street, {"bets": "bet", "raises": "raise", "calls": "call",
+                                         "checks": "check", "folds": "fold"}[verb], max(inv.values()) > inv[who]))
         if verb == "folds":
             active.discard(who)
         elif verb == "calls":
@@ -142,12 +155,27 @@ def parse_hand(text: str) -> HandReview | None:
         if street != "preflop" and verb != "folds":
             history.append((street, who, {"bets": "bet", "raises": "raise", "calls": "call", "checks": "check"}[verb]))
     review.board = board
+    for name in stacks:
+        if name == hero:
+            continue
+        st = profiles.setdefault(name, PlayerStats())
+        st.hands += 1
+        mine = [e for e in events if e[0] == name]
+        pre = [e for e in mine if e[1] == "preflop" and e[2] != "check"]
+        if pre:
+            st.record_preflop(any(e[2] != "fold" for e in pre), any(e[2] == "raise" for e in pre), BASE_VPIP)
+        for _n, st_name, kind, facing in mine:
+            if st_name != "preflop":
+                st.record_postflop(kind, facing)
+        river = [e[2] for e in mine if e[1] == "river"]
+        if name in shown and len(board) == 5 and river and river[-1] in ("bet", "raise"):
+            st.record_showdown(calc.is_weak_showdown(to_eval7(shown[name]), to_eval7(board)))
     review.net_bb = round(collected - total[hero], 2)
     return review
 
 
 def _review(street, kind, verb, amount, to, hero, pos, board, pot, inv, stacks, active,
-            pre_raises, pre_callers, history, cards) -> DecisionReview:
+            pre_raises, pre_callers, history, cards, profiles) -> DecisionReview:
     ru = {"folds": "фолд", "checks": "чек", "calls": f"колл {amount:g} bb",
           "bets": f"бет {amount:g} bb", "raises": f"рейз до {to:g} bb"}[verb]
     d = DecisionReview(street, ru, kind)
@@ -186,7 +214,8 @@ def _review(street, kind, verb, amount, to, hero, pos, board, pot, inv, stacks, 
             hero_cards=cards, board=board, hero_pos=pos[hero], villain_pos=pos[villain] if villain else None,
             preflop_line=line, pot=round(pot, 2), to_call=round(min(to_call, stacks[hero]), 2),
             stack=round(stacks[hero], 2), hero_invested=0 if street == "preflop" else round(inv[hero], 2),
-            history=[(st, "hero" if w == hero else "villain", k) for st, w, k in history])
+            history=[(st, "hero" if w == hero else "villain", k) for st, w, k in history],
+            villain_adj=profiles[villain].adjust() if villain in profiles else None)
         d.advice = analyze(d.state)
         d.matched = matches(d.advice, kind)
     except (ValidationError, ValueError) as e:
@@ -196,8 +225,9 @@ def _review(street, kind, verb, amount, to, hero, pos, board, pot, inv, stacks, 
 
 def review_session(text: str) -> list[HandReview]:
     out = []
+    profiles: dict[str, PlayerStats] = {}        # профиль копится по ходу сессии: только прошлые раздачи
     for chunk in split_hands(text):
-        h = parse_hand(chunk)
+        h = parse_hand(chunk, profiles)
         if h is not None:
             out.append(h)
     return out

@@ -89,3 +89,36 @@ def vs_3bet_ranges(hero_pos: str) -> tuple[str, str]:
 
 def range_percent(range_str: str) -> float:
     return 100 * len(combos(range_str)) / 1326
+
+
+def chen(key: str) -> float:
+    """Формула Чена — грубая оценка силы стартовой руки ('AKs', '77', 'T9o')."""
+    order = "23456789TJQKA"
+    pts = {"A": 10, "K": 8, "Q": 7, "J": 6}
+    hi, lo = order.index(key[0]), order.index(key[1])
+    score = pts.get(key[0], (hi + 2) / 2)
+    if hi == lo:
+        return max(score * 2, 5)
+    if key.endswith("s"):
+        score += 2
+    gap = hi - lo - 1
+    score -= {0: 0, 1: 1, 2: 2, 3: 4}.get(gap, 5)
+    if gap <= 1 and hi < order.index("Q"):
+        score += 1
+    return score
+
+
+def scale_range(range_str: str, factor: float):
+    """Диапазон в `factor` раз уже или шире: убираем слабейшие руки или добавляем лучшие из остальных."""
+    base = combos(range_str)
+    if abs(factor - 1) < 0.05 or not base:
+        return base
+    key = lambda c: chen(hand_key([str(c[0]), str(c[1])]))
+    target = max(4, int(len(base) * factor))
+    if factor < 1:
+        return sorted(base, key=key, reverse=True)[:target]
+    have = {frozenset(c) for c in base}
+    cards = eval7.Deck().cards
+    rest = [(a, b) for i, a in enumerate(cards) for b in cards[i + 1:] if frozenset((a, b)) not in have]
+    rest.sort(key=key, reverse=True)
+    return base + rest[:target - len(base)]

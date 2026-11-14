@@ -1,6 +1,7 @@
 """Окно приложения. Запуск: python -m poker_coach.ui"""
 from __future__ import annotations
 
+import random
 import sys
 
 from pydantic import ValidationError
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from . import charts, ranges
 from .coach import Analysis, analyze, explain
+from .bots import STYLES
 from .engine import STREET_RU, Game, H, V
 from .hh import review_session
 from .scenarios import random_state
@@ -375,12 +377,32 @@ class GameTab(QWidget):
         root.addLayout(left, 1)
         root.addLayout(right, 1)
 
+        obox = QGroupBox("Соперник")
+        ol = QVBoxLayout(obox)
+        orow = QHBoxLayout()
+        self.style = QComboBox()
+        for st in STYLES.values():
+            self.style.addItem(st.name, st.key)
+        self.style.addItem("Случайный (тип скрыт)", "hidden")
+        self.use_profile = QCheckBox("Тренер учитывает профиль")
+        self.use_profile.setChecked(True)
+        self.btn_reveal = QPushButton("Раскрыть тип")
+        orow.addWidget(self.style, 1)
+        orow.addWidget(self.use_profile)
+        orow.addWidget(self.btn_reveal)
+        ol.addLayout(orow)
+        self.profile = QLabel()
+        self.profile.setWordWrap(True)
+        self.profile.setStyleSheet("color:#8fa3b8; font-size:11px;")
+        ol.addWidget(self.profile)
+        left.addWidget(obox)
+
         table = QGroupBox("Стол")
         tl = QVBoxLayout(table)
         self.table = QLabel()
         self.table.setTextFormat(Qt.RichText)
         self.table.setAlignment(Qt.AlignCenter)
-        self.table.setMinimumHeight(250)
+        self.table.setMinimumHeight(215)
         tl.addWidget(self.table)
         left.addWidget(table)
         self.actions = QHBoxLayout()
@@ -422,8 +444,27 @@ class GameTab(QWidget):
         self.btn_new.clicked.connect(self.new_hand)
         self.btn_hint.clicked.connect(self.hint)
         self.btn_overlay.clicked.connect(self.toggle_overlay)
+        self.style.currentIndexChanged.connect(self.change_style)
+        self.use_profile.toggled.connect(self.set_use_profile)
+        self.btn_reveal.clicked.connect(self.reveal)
+        self.btn_reveal.hide()
         self.overlay.live.toggled.connect(lambda _on: self.update_overlay())
         self.refresh()
+
+    def change_style(self) -> None:
+        key = self.style.currentData()
+        hidden = key == "hidden"
+        self.btn_reveal.setVisible(hidden)
+        self.btn_reveal.setText("Раскрыть тип")
+        self.game.set_style(random.choice(list(STYLES)) if hidden else key)
+        self.hands, self.total, self.counted = 0, 0.0, False
+        self.new_hand_ui()
+
+    def set_use_profile(self, on: bool) -> None:
+        self.game.use_profile = on
+
+    def reveal(self) -> None:
+        self.btn_reveal.setText(f"Это был: {self.game.style.name}")
 
     def toggle_overlay(self) -> None:
         if self.overlay.isVisible():
@@ -449,6 +490,9 @@ class GameTab(QWidget):
 
     def new_hand(self) -> None:
         self.game.new_hand()
+        self.new_hand_ui()
+
+    def new_hand_ui(self) -> None:
         self.counted = False
         self.verdict.setText("Сделайте ход — тренер прокомментирует решение.")
         self.verdict.setStyleSheet("font-size:17px; font-weight:bold;")
@@ -515,6 +559,11 @@ class GameTab(QWidget):
                 self.coach.append(f"\n— Итог раздачи —\n{g.result}\nРешений по совету тренера: "
                                   f"{ok} из {len(g.decisions)}\n" + "\n".join(lines))
         self.score.setText(f"Сыграно раздач: {self.hands} · общий итог: {self.total:+g} bb")
+        adj = g.stats.adjust()
+        about = "" if self.style.currentData() == "hidden" else g.style.about + " "
+        seen = f"Замечено — {g.stats.summary()}. " if g.stats.hands else "Наблюдений пока нет. "
+        self.profile.setText(about + seen + (f"Вывод тренера: {adj.label}." if adj.label else
+                                             "Вывод тренера: отклонений от стандартной игры пока не видно."))
         self.update_overlay()
 
 

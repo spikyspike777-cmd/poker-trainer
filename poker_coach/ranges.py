@@ -47,7 +47,7 @@ NARROW = {"bet": (0.50, 0.12), "raise": (0.30, 0.08), "call": (0.60, 0.0)}
 CHECK_BACK_DROP = 0.25      # чек в позиции: убираем верх диапазона (сильные руки обычно ставят)
 
 
-def narrow(combos, board, kind: str, in_position: bool):
+def narrow(combos, board, kind: str, in_position: bool, bluff_scale: float = 1.0):
     """Сузить диапазон после одного действия игрока на борде `board` (эвристика)."""
     if len(combos) < 4:
         return combos
@@ -57,7 +57,7 @@ def narrow(combos, board, kind: str, in_position: bool):
     keep, bluffs = NARROW[kind]
     n = max(1, int(len(ranked) * keep))
     kept, rest = ranked[:n], ranked[n:]
-    k = int(len(ranked) * bluffs)
+    k = int(len(ranked) * min(0.35, bluffs * bluff_scale))
     if k:
         kept, rest = kept + rest[-k:], rest[:-k]
     if len(board) < 5:
@@ -66,12 +66,18 @@ def narrow(combos, board, kind: str, in_position: bool):
     return kept
 
 
+def _scales(state: GameState) -> tuple[float, float]:
+    adj = state.villain_adj
+    return (adj.range_scale, adj.bluff_scale) if adj else (1.0, 1.0)
+
+
 def _through_history(combos, state: GameState, who: str, in_position: bool, include_current: bool):
     board = to_eval7(state.board)
+    bluff_scale = _scales(state)[1] if who == "villain" else 1.0
     for street, actor, kind in state.history:
         if actor != who or (street == state.street and not include_current):
             continue
-        combos = narrow(combos, board[:_STREET_CARDS[street]], kind, in_position)
+        combos = narrow(combos, board[:_STREET_CARDS[street]], kind, in_position, bluff_scale)
     return combos
 
 
@@ -85,7 +91,8 @@ def hero_range(state: GameState) -> list[calc.Combo]:
 def villain_start(state: GameState) -> list[calc.Combo]:
     """Диапазон оппонента на начало текущей улицы: префлоп-линия + действия на прошлых улицах."""
     rng_str, _ = _start(state)
-    combos = calc.live_combos(charts.combos(rng_str), to_eval7(state.hero_cards) + to_eval7(state.board))
+    combos = calc.live_combos(charts.scale_range(rng_str, _scales(state)[0]),
+                              to_eval7(state.hero_cards) + to_eval7(state.board))
     return _through_history(combos, state, "villain", not state.in_position, include_current=False)
 
 
@@ -95,8 +102,11 @@ def villain_range(state: GameState) -> VillainRange | None:
         return None
     rng_str, label = start
     hero, board = to_eval7(state.hero_cards), to_eval7(state.board)
-    combos = calc.live_combos(charts.combos(rng_str), hero + board)
-    vr = VillainRange(combos, label, charts.range_percent(rng_str))
+    scale, bluff_scale = _scales(state)
+    combos = calc.live_combos(charts.scale_range(rng_str, scale), hero + board)
+    vr = VillainRange(combos, label, charts.range_percent(rng_str) * (scale if abs(scale - 1) >= 0.05 else 1))
+    if abs(scale - 1) >= 0.05:
+        vr.label += f", с поправкой на профиль (×{scale:g})"
     if not board:
         return vr
     if state.history:
@@ -105,7 +115,7 @@ def villain_range(state: GameState) -> VillainRange | None:
             vr.label += ", сужен по его действиям на постфлопе"
             vr.narrowed = True
     elif state.to_call > 0:
-        vr.combos = narrow(combos, board, "bet", not state.in_position)
+        vr.combos = narrow(combos, board, "bet", not state.in_position, bluff_scale)
         vr.label += ", после ставки оставлены сильные руки, дро и часть блефов"
         vr.narrowed = True
     return vr
