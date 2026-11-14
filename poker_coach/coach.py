@@ -7,7 +7,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import calc, charts, ranges
+from .solver import RiverCFR, Solver, Spot
 from .state import GameState, PreflopLine as L, to_eval7
+
+# Солвер для постфлопа. None — только эвристика. Заменяется любой реализацией solver.base.Solver.
+SOLVER: Solver | None = RiverCFR(iterations=300)
 
 ACTION_RU = {"fold": "Фолд", "check": "Чек", "call": "Колл", "bet": "Бет", "raise": "Рейз", "allin": "Олл-ин"}
 
@@ -24,7 +28,9 @@ class Analysis:
     outs: dict[str, list[str]] = field(default_factory=dict)
     villain: ranges.VillainRange | None = None
     reasons: list[str] = field(default_factory=list)
-    source: str = ""                     # откуда совет: чарт или эвристика
+    source: str = ""                     # откуда совет: чарт, эвристика или солвер
+    mix: list[tuple[str, float | None, float, float]] = field(default_factory=list)
+    # ^ смешанная стратегия солвера: (действие, размер, частота, EV в bb)
 
     @property
     def headline(self) -> str:
@@ -49,6 +55,8 @@ def analyze(state: GameState) -> Analysis:
         a.hand = calc.hand_name(hero, board)
         a.outs = calc.outs(hero, board)
         _postflop(state, a)
+        if SOLVER is not None and state.hero_invested == 0:
+            _solve(state, a, hero, board)
     else:
         _preflop(state, a)
     return a
@@ -170,6 +178,55 @@ def _postflop(s: GameState, a: Analysis) -> None:
                              "Рука слабая против его диапазона — чек, не вкладываем фишки.")
     a.reasons.append(f"Вы {pos}; SPR (стек к банку) = {a.spr:.1f}"
                      + (" — стеки мелкие, любая крупная ставка ведёт к олл-ину." if a.spr < 3 else "."))
+
+
+def _mix_label(kind: str, amount: float | None, pot: float) -> str:
+    if kind in ("bet", "raise") and amount:
+        tail = f" ({amount / pot:.0%} банка)" if kind == "bet" else ""
+        return f"{ACTION_RU[kind].lower()} {amount:g} bb{tail}"
+    return ACTION_RU[kind].lower()
+
+
+def _solve(s: GameState, a: Analysis, hero, board) -> None:
+    """Если солвер умеет этот спот — заменить эвристический совет равновесной стратегией."""
+    pot0 = s.pot - s.to_call                         # банк до ставки оппонента
+    spot = Spot(hero=tuple(hero), board=board, hero_range=ranges.hero_range(s),
+                villain_range=ranges.villain_start(s), pot=pot0, stack=s.stack,
+                hero_in_position=s.in_position, facing_bet=s.to_call)
+    if not SOLVER.supports(spot) or not spot.villain_range:
+        return
+    res = SOLVER.solve(spot)
+    acts = [x for x in res.actions if x.freq >= 0.05] or res.actions
+    total = sum(x.freq for x in acts)
+    acts.sort(key=lambda x: -x.freq)
+    a.mix = [(x.kind, x.amount if x.kind in ("bet", "raise", "call") else None, x.freq / total, round(x.ev, 2) + 0.0) for x in acts]
+    kind, amount, freq, _ev = a.mix[0]
+    a.action, a.amount = kind, amount
+    a.sizing = f"{amount / pot0:.0%} банка" if kind == "bet" else ("3× ставки" if kind == "raise" else "")
+    a.equity = res.equity
+    a.villain.combos, a.villain.weights, a.villain.narrowed = res.villain_combos, res.villain_weights, True
+    a.villain.label = a.villain.label.split(",")[0] + "; частоты рук — из решения солвера"
+    eq = a.equity
+    r = [f"Сейчас у вас {a.hand}. Против рук, с которыми оппонент доходит до этой точки, ваше эквити — {eq:.0%}."]
+    if s.to_call > 0:
+        r.append(f"Нужно доставить {s.to_call:g} bb в банк {s.pot:g} bb — по шансам банка нужно {a.required:.0%}.")
+    parts = "; ".join(f"{_mix_label(k, amt, pot0)} — {f:.0%} (EV {ev + 0.0:+.1f} bb)" for k, amt, f, ev in a.mix)
+    r.append(f"Равновесная стратегия с этой рукой: {parts}.")
+    if len(a.mix) > 1 and a.mix[1][2] >= 0.25:
+        r.append("Солвер смешивает действия: их ожидание почти одинаково, поэтому ошибкой не будет ни одно из них.")
+    if kind in ("bet", "raise", "allin"):
+        r.append("Это ставка для велью: вас заколлирует достаточно худших рук." if eq >= 0.5 else
+                 "Это блеф: на вскрытии рука почти не выигрывает, а ставка заставит сбросить часть более сильных рук.")
+    elif kind == "call":
+        r.append("Колл: эквити выше, чем требуют шансы банка." if eq >= a.required else
+                 "Колл как блеф-кэтчер: рука бьёт только блефы, но их в его диапазоне ставки достаточно.")
+    elif kind == "check":
+        r.append("Чек: худшие руки на ставку сбросят, а лучшие заколлируют — ставить невыгодно.")
+    else:
+        r.append("Фолд: против его диапазона ставки эта рука выигрывает слишком редко.")
+    r.append(f"Вы {'в позиции' if s.in_position else 'без позиции'}; SPR (стек к банку) = {a.spr:.1f}.")
+    a.reasons = r
+    a.source = f"{res.name}; диапазоны на входе — по префлоп-чартам"
 
 
 def explain(a: Analysis) -> str:

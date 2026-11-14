@@ -17,6 +17,7 @@ class VillainRange:
     label: str
     percent: float           # доля от всех стартовых рук до учёта борда
     narrowed: bool = False
+    weights: list[float] | None = None   # вес каждой комбинации (от солвера); None — все равны
 
 
 def _start(state: GameState) -> tuple[str, str] | None:
@@ -32,6 +33,26 @@ def _start(state: GameState) -> tuple[str, str] | None:
     if line == L.HERO_OPEN_VILLAIN_CALL:
         return charts.vs_open_ranges(v, h)[1] or _SB_CALL_FALLBACK, f"колл с {v} против опена с {h}"
     return charts.vs_3bet_ranges(v)[1], f"колл 3-бета с {v}"
+
+
+def hero_range(state: GameState) -> list[calc.Combo]:
+    """Диапазон, с которым герой по чартам приходит на постфлоп (нужен солверу)."""
+    h, v, line = state.hero_pos, state.villain_pos, state.preflop_line
+    if line == L.HERO_OPEN_VILLAIN_CALL:
+        rng = charts.RFI.get(h, charts.RFI["BTN"])
+    elif line == L.VILLAIN_OPEN_HERO_CALL:
+        rng = charts.vs_open_ranges(h, v)[1] or _SB_CALL_FALLBACK
+    elif line == L.HERO_3BET_VILLAIN_CALL:
+        rng = charts.vs_open_ranges(h, v)[0]
+    else:
+        rng = charts.vs_3bet_ranges(h)[1]
+    return calc.live_combos(charts.combos(rng), to_eval7(state.board))
+
+
+def villain_start(state: GameState) -> list[calc.Combo]:
+    """Диапазон оппонента по префлоп-линии, без сужения по ставкам."""
+    rng_str, _ = _start(state)
+    return calc.live_combos(charts.combos(rng_str), to_eval7(state.hero_cards) + to_eval7(state.board))
 
 
 def villain_range(state: GameState) -> VillainRange | None:
@@ -69,9 +90,11 @@ def matrix(vr: VillainRange | None) -> dict[str, float]:
     """Для сетки 13×13: 'AKs' -> доля комбинаций этой руки в диапазоне (0..1)."""
     if vr is None:
         return {}
-    cnt: dict[str, int] = {}
-    for a, b in vr.combos:
+    cnt: dict[str, float] = {}
+    ws = vr.weights or [1.0] * len(vr.combos)
+    top = max(ws, default=1.0) or 1.0
+    for (a, b), w in zip(vr.combos, ws):
         k = charts.hand_key([str(a), str(b)])
-        cnt[k] = cnt.get(k, 0) + 1
+        cnt[k] = cnt.get(k, 0.0) + w / top
     full = lambda k: 6 if len(k) == 2 else (4 if k[2] == "s" else 12)
-    return {k: min(1.0, n / full(k)) for k, n in cnt.items()}
+    return {k: min(1.0, n / full(k)) for k, n in cnt.items() if n / full(k) > 0.02}

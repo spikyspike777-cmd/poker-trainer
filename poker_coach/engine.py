@@ -115,7 +115,8 @@ class Game:
         return GameState(
             hero_cards=self.cards[p], board=self.board, hero_pos=self.pos[p],
             villain_pos=None if unopened else self.pos[o], preflop_line=line, pot=self.pot,
-            to_call=0 if unopened else max(0.0, round(self.inv[o] - self.inv[p], 2)), stack=self.stack[p])
+            to_call=0 if unopened else max(0.0, round(self.inv[o] - self.inv[p], 2)), stack=self.stack[p],
+            hero_invested=0 if self.street == "preflop" else self.inv[p])
 
     def advice(self, p: str = H) -> Analysis:
         st, o = self.state(p), self._other(p)
@@ -172,7 +173,10 @@ class Game:
 
     def hero_act(self, opt: Option) -> None:
         adv = self.advice(H)
-        d = Decision(self.street, opt.label, adv, _group(opt.kind) == _group(adv.action))
+        matched = _group(opt.kind) == _group(adv.action)
+        if adv.mix:      # солвер смешивает: решение верное, если он сам так играет хотя бы в 15% случаев
+            matched = sum(f for k, _a, f, _e in adv.mix if _group(k) == _group(opt.kind)) >= 0.15
+        d = Decision(self.street, opt.label, adv, matched)
         self.decisions.append(d)
         self.last = d
         self._apply(H, opt.kind, opt.to)
@@ -183,6 +187,9 @@ class Game:
             a = self.advice(V)
             to_call = self.inv[H] - self.inv[V]
             kind, to = a.action, 0.0
+            if a.mix:
+                kind, amt, _f, _e = self.rng.choices(a.mix, weights=[m[2] for m in a.mix])[0]
+                a.amount = amt
             if kind in ("bet", "raise", "allin"):
                 to = self.inv[V] + self.stack[V] if kind == "allin" else max(a.amount, 2 * self.inv[H])
                 kind = "raise"

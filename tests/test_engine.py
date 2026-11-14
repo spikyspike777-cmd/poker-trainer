@@ -2,7 +2,13 @@ import random
 
 import pytest
 
+from poker_coach import coach
 from poker_coach.engine import Game, H, V
+
+
+@pytest.fixture(autouse=True)
+def fast_solver(monkeypatch):
+    monkeypatch.setattr(coach.SOLVER, "iterations", 30)
 
 
 def test_random_playouts_conserve_chips():
@@ -35,6 +41,8 @@ def test_following_coach_always_matches():
             adv = g.advice(H)
             group = {"fold": "fold", "check": "check", "call": "call"}.get(adv.action, "raise")
             opts = [o for o in g.options() if o.kind == group]
+            if adv.action == "allin":
+                opts = opts[-1:]
             assert opts, (adv.action, [o.label for o in g.options()], g.log)
             g.hero_act(opts[0])
             assert g.last.matched
