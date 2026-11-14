@@ -91,6 +91,8 @@ def parse_hand(text: str, profiles: dict[str, PlayerStats] | None = None) -> Han
     collected = 0.0
     events: list[tuple[str, str, str, bool]] = []       # (игрок, улица, действие, отвечал ли на ставку)
     shown: dict[str, list[str]] = {}
+    pre_tokens: list[str] = []                    # префлоп-линия в нотации PokerBench
+    acted: set[str] = set()                       # кто уже вложил деньги добровольно
 
     def put(player: str, to: float) -> None:
         nonlocal pot
@@ -135,10 +137,19 @@ def parse_hand(text: str, profiles: dict[str, PlayerStats] | None = None) -> Han
         if who == hero:
             review.decisions.append(_review(
                 street, kind, verb, amount, to, hero, pos, board, pot, inv, stacks, active,
-                pre_raises, pre_callers, history, review.hero_cards, profiles))
+                pre_raises, pre_callers, history, review.hero_cards, profiles, "/".join(pre_tokens)))
         else:
             events.append((who, street, {"bets": "bet", "raises": "raise", "calls": "call",
                                          "checks": "check", "folds": "fold"}[verb], max(inv.values()) > inv[who]))
+        if street == "preflop":
+            if verb == "raises":
+                pre_tokens.append(f"{pos[who]}/" + ("allin" if "all-in" in ln else f"{to:.1f}bb"))
+                acted.add(who)
+            elif verb == "calls":
+                pre_tokens.append(f"{pos[who]}/call")
+                acted.add(who)
+            elif verb == "folds" and who in acted:
+                pre_tokens.append(f"{pos[who]}/fold")
         if verb == "folds":
             active.discard(who)
         elif verb == "calls":
@@ -175,7 +186,7 @@ def parse_hand(text: str, profiles: dict[str, PlayerStats] | None = None) -> Han
 
 
 def _review(street, kind, verb, amount, to, hero, pos, board, pot, inv, stacks, active,
-            pre_raises, pre_callers, history, cards, profiles) -> DecisionReview:
+            pre_raises, pre_callers, history, cards, profiles, pre_line) -> DecisionReview:
     ru = {"folds": "фолд", "checks": "чек", "calls": f"колл {amount:g} bb",
           "bets": f"бет {amount:g} bb", "raises": f"рейз до {to:g} bb"}[verb]
     d = DecisionReview(street, ru, kind)
@@ -192,7 +203,7 @@ def _review(street, kind, verb, amount, to, hero, pos, board, pot, inv, stacks, 
         elif n == 3 and pre_raises[1] == hero and pre_raises[2] == pre_raises[0] and not pre_callers:
             line, villain = L.VS_4BET, pre_raises[2]
         else:
-            d.note = "Префлоп-ситуация пока не поддерживается (лимп, несколько игроков в банке или 5-бет)."
+            line = L.OTHER                      # лимпы, несколько игроков, олл-ины — по таблице солвера
     elif len(others) != 1 or not 1 <= n <= 3:
         d.note = "Постфлоп поддерживается только один на один в рейзнутом банке."
     else:
@@ -209,11 +220,13 @@ def _review(street, kind, verb, amount, to, hero, pos, board, pot, inv, stacks, 
     if line is None:
         return d
     to_call = 0.0 if line == L.UNOPENED else max(0.0, max(inv.values()) - inv[hero])
+    pre = street == "preflop"
     try:
         d.state = GameState(
             hero_cards=cards, board=board, hero_pos=pos[hero], villain_pos=pos[villain] if villain else None,
             preflop_line=line, pot=round(pot, 2), to_call=round(min(to_call, stacks[hero]), 2),
-            stack=round(stacks[hero], 2), hero_invested=0 if street == "preflop" else round(inv[hero], 2),
+            stack=round(stacks[hero], 2), hero_invested=0 if pre else round(inv[hero], 2),
+            preflop_actions=pre_line if pre else None,
             history=[(st, "hero" if w == hero else "villain", k) for st, w, k in history],
             villain_adj=profiles[villain].adjust() if villain in profiles else None)
         d.advice = analyze(d.state)

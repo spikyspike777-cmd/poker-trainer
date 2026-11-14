@@ -23,8 +23,12 @@ def test_sample_session(monkeypatch):
     assert all(d.matched is not None for h in hands for d in h.decisions)
 
 
-def test_multiway_is_marked_unsupported():
-    text = SAMPLE.read_text(encoding="utf-8").replace("Bravo: folds\nHero: raises $0.15 to $0.25\nDelta: folds\nEcho: calls",
-                                                      "Bravo: calls $0.10\nHero: raises $0.15 to $0.25\nDelta: folds\nEcho: calls", 1)
-    d = review_session(text)[0].decisions[0]
-    assert d.matched is None and d.note
+def test_limped_pot_is_reviewed_by_table():
+    text = SAMPLE.read_text(encoding="utf-8").replace(
+        "Bravo: folds\nHero: raises $0.15 to $0.25\nDelta: folds\nEcho: calls",
+        "Bravo: calls $0.10\nHero: raises $0.15 to $0.25\nDelta: folds\nEcho: calls", 1)
+    hand = review_session(text)[0]
+    pre = hand.decisions[0]
+    assert pre.state.preflop_line.value == "other" and pre.state.preflop_actions == "CO/call"
+    assert pre.matched is not None and pre.advice.action in ("raise", "fold", "call")
+    assert hand.decisions[1].matched is None and hand.decisions[1].note        # постфлоп втроём не оцениваем

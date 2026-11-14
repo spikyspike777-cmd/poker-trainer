@@ -6,9 +6,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import calc, charts, ranges
+from . import calc, charts, preflop_gto, ranges
 from .solver import RiverCFR, Solver, Spot
 from .state import GameState, PreflopLine as L, to_eval7
+
+# Использовать ли префлоп-таблицу из решений солвера (иначе — только ручные чарты).
+USE_GTO_TABLE = True
 
 # Солвер для постфлопа. None — только эвристика. Заменяется любой реализацией solver.base.Solver.
 SOLVER: Solver | None = RiverCFR(iterations=300)
@@ -58,7 +61,8 @@ def matches(a: Analysis, kind: str) -> bool:
     return _group(kind) == _group(a.action)
 
 
-def analyze(state: GameState) -> Analysis:
+def analyze(state: GameState, use_table: bool = True) -> Analysis:
+    """use_table=False — префлоп только по ручным чартам (так играют боты)."""
     hero, board = to_eval7(state.hero_cards), to_eval7(state.board)
     vr = ranges.villain_range(state)
     a = Analysis(action="fold", villain=vr, spr=calc.spr(state.stack, state.pot),
@@ -75,13 +79,102 @@ def analyze(state: GameState) -> Analysis:
         elif SOLVER is not None and state.hero_invested == 0:
             _solve(state, a, hero, board)
     else:
-        _preflop(state, a)
+        _preflop(state, a, use_table)
     return a
 
 
 # ---------- префлоп: чарты ----------
 
-def _preflop(s: GameState, a: Analysis) -> None:
+def _implied_actions(s: GameState) -> str | None:
+    """Запись префлоп-линии для стандартных ситуаций, если её не передали явно."""
+    if s.preflop_actions is not None:
+        return s.preflop_actions
+    h, v = s.hero_pos, s.villain_pos
+    blind = {"SB": 0.5, "BB": 1.0}.get(h, 0.0)
+    if s.preflop_line == L.UNOPENED:
+        return ""
+    if s.preflop_line == L.VS_OPEN:
+        return f"{v}/{s.to_call + blind:.1f}bb"
+    if s.preflop_line == L.VS_3BET:
+        mine = charts.OPEN_SIZE.get(h, 2.5)
+        return f"{h}/{mine:.1f}bb/{v}/{s.to_call + mine:.1f}bb"
+    return None
+
+
+def _preflop_table(s: GameState, a: Analysis) -> bool:
+    """Совет из таблицы решений солвера. False — линии в таблице нет."""
+    line = _implied_actions(s)
+    hit = preflop_gto.lookup(line, s.hero_pos, s.hero_cards) if USE_GTO_TABLE and line is not None else None
+    if hit is None:
+        return False
+    key = charts.hand_key(s.hero_cards)
+    a.source = "префлоп-таблица из решений солвера (PokerBench, 6-max, 100bb)"
+    if hit.kind == "raise":
+        amount = hit.amount
+        if not hit.same_sizes and s.to_call > 0:          # размеры ставок в раздаче другие — масштабируем рейз
+            amount = round(max(amount, 2.2 * (s.to_call + s.hero_invested)), 1)
+        a.action, a.amount = ("allin", None) if amount >= s.stack + s.hero_invested else ("raise", amount)
+    elif hit.kind == "allin":
+        a.action = "allin"
+    else:
+        a.action, a.amount = hit.kind, (s.to_call if hit.kind == "call" else None)
+    what = {"raise": "рейз", "allin": "олл-ин", "call": "колл", "check": "чек", "fold": "фолд"}[hit.kind]
+    spot = "при открытии" if line == "" else "в этой линии торговли"
+    if hit.exact:
+        a.reasons.append(f"{key} с {s.hero_pos} {spot}: солвер выбирает {what}.")
+    else:
+        a.reasons.append(f"Точно {key} в таблице для этой линии нет; решение взято по ближайшим рукам "
+                         f"({', '.join(hit.neighbours)}): {what}.")
+    if a.equity is not None:
+        a.reasons.append(f"Ваше эквити против его диапазона (верхние {a.villain.percent:.0f}% рук) — {a.equity:.0%}, "
+                         f"для колла по шансам банка нужно {a.required:.0%}.")
+    if line == "":
+        a.reasons.append(_pos_note(s.hero_pos))
+    elif s.villain_pos:
+        a.reasons.append("Вы в позиции: будете ходить последним на постфлопе." if s.in_position
+                         else "Вы без позиции: на постфлопе придётся ходить первым.")
+    return True
+
+
+_SHOVE_CALL = {1: "TT+, AQs+, AKo", 2: "TT+, AQs+, AKo", 3: "QQ+, AKs, AKo"}
+
+
+def _preflop_other(s: GameState, a: Analysis) -> None:
+    """Нестандартная линия, которой нет в таблице: грубые правила по числу рейзов."""
+    key = charts.hand_key(s.hero_cards)
+    toks = [x for x in (s.preflop_actions or "").split("/") if x]
+    acts = list(zip(toks[::2], toks[1::2]))
+    n = sum(1 for _p, x in acts if x.endswith("bb") or x == "allin")
+    allin = any(x == "allin" for _p, x in acts)
+    a.source = "упрощённое правило для редкой префлоп-линии"
+    if n == 0:                                                    # лимпы
+        rng = charts.vs_open_ranges("BB", "SB")[0] if s.hero_pos == "BB" else charts.RFI.get(s.hero_pos, charts.RFI["BTN"])
+        if charts.in_range(s.hero_cards, rng):
+            a.action, a.amount = "raise", round(3.0 + sum(1 for _p, x in acts if x == "call"), 1)
+            a.reasons.append(f"{key} достаточно сильна, чтобы рейзить против лимпа.")
+        else:
+            a.action = "check" if s.to_call == 0 else "fold"
+            a.reasons.append(f"{key} слишком слаба для рейза против лимпа.")
+        return
+    if allin or n >= 4:
+        rng = _SHOVE_CALL.get(n, "KK+, AKs")
+        a.action, a.amount = ("call", s.to_call) if charts.in_range(s.hero_cards, rng) else ("fold", None)
+        a.reasons.append(f"Против олл-ина после {n} рейзов коллируем только {rng}.")
+        return
+    raise_rng, call_rng = ("KK+", "") if n >= 2 else ("QQ+, AKs", "JJ-TT, AQs, AKo")
+    if charts.in_range(s.hero_cards, raise_rng):
+        a.action, a.amount = "raise", round(2.3 * (s.to_call + s.hero_invested), 1)
+    elif charts.in_range(s.hero_cards, call_rng):
+        a.action, a.amount = "call", s.to_call
+    a.reasons.append(f"В банке уже {n} рейз(а) и несколько игроков — продолжаем только с очень сильными руками.")
+
+
+def _preflop(s: GameState, a: Analysis, use_table: bool = True) -> None:
+    if use_table and _preflop_table(s, a):
+        return
+    if s.preflop_line == L.OTHER:
+        _preflop_other(s, a)
+        return
     key = charts.hand_key(s.hero_cards)
     a.source = "префлоп-чарт 6-max, 100bb"
     blind = {"SB": 0.5, "BB": 1.0}.get(s.hero_pos, 0.0)

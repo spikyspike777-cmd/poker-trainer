@@ -22,7 +22,7 @@ class VillainRange:
 
 def _start(state: GameState) -> tuple[str, str] | None:
     h, v, line = state.hero_pos, state.villain_pos, state.preflop_line
-    if line == L.UNOPENED:
+    if line in (L.UNOPENED, L.OTHER) or v is None:
         return None
     if line in (L.VS_OPEN, L.VILLAIN_OPEN_HERO_CALL):
         return charts.RFI.get(v, charts.RFI["BTN"]), f"открытие рейзом с {v}"
