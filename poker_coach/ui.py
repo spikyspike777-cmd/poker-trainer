@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from . import charts, ranges
 from .coach import Analysis, analyze, explain
+from .engine import STREET_RU, Game, H, V
 from .scenarios import random_state
 from .state import LINE_LABELS, POSITIONS, PREFLOP_DECISIONS, RANKS, GameState, PreflopLine
 
@@ -357,17 +358,148 @@ class TrainerTab(QWidget):
         self.text.setPlainText(msg)
 
 
+class GameTab(QWidget):
+    """Полная раздача против бота: решение на каждой улице и комментарий тренера."""
+
+    def __init__(self):
+        super().__init__()
+        self.game = Game()
+        self.hands = 0
+        self.total = 0.0
+        self.counted = False
+        root = QHBoxLayout(self)
+        left, right = QVBoxLayout(), QVBoxLayout()
+        root.addLayout(left, 1)
+        root.addLayout(right, 1)
+
+        table = QGroupBox("Стол")
+        tl = QVBoxLayout(table)
+        self.table = QLabel()
+        self.table.setTextFormat(Qt.RichText)
+        self.table.setAlignment(Qt.AlignCenter)
+        self.table.setMinimumHeight(250)
+        tl.addWidget(self.table)
+        left.addWidget(table)
+        self.actions = QHBoxLayout()
+        left.addLayout(self.actions)
+        row = QHBoxLayout()
+        self.btn_hint = QPushButton("Подсказка тренера")
+        self.btn_new = QPushButton("Новая раздача")
+        self.btn_new.setObjectName("primary")
+        row.addWidget(self.btn_hint)
+        row.addWidget(self.btn_new)
+        left.addLayout(row)
+        lbox = QGroupBox("Ход раздачи")
+        ll = QVBoxLayout(lbox)
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        ll.addWidget(self.log)
+        left.addWidget(lbox, 1)
+        self.score = QLabel()
+        self.score.setStyleSheet("color:#8fa3b8;")
+        left.addWidget(self.score)
+
+        self.verdict = QLabel("Сделайте ход — тренер прокомментирует решение.")
+        self.verdict.setWordWrap(True)
+        self.verdict.setStyleSheet("font-size:17px; font-weight:bold;")
+        self.bar = EquityBar()
+        right.addWidget(self.verdict)
+        right.addWidget(self.bar)
+        cbox = QGroupBox("Комментарий тренера")
+        cl = QVBoxLayout(cbox)
+        self.coach = QTextEdit()
+        self.coach.setReadOnly(True)
+        cl.addWidget(self.coach)
+        right.addWidget(cbox, 1)
+
+        self.btn_new.clicked.connect(self.new_hand)
+        self.btn_hint.clicked.connect(self.hint)
+        self.refresh()
+
+    def new_hand(self) -> None:
+        self.game.new_hand()
+        self.counted = False
+        self.verdict.setText("Сделайте ход — тренер прокомментирует решение.")
+        self.verdict.setStyleSheet("font-size:17px; font-weight:bold;")
+        self.bar.set_values(None, 0)
+        self.coach.clear()
+        self.refresh()
+
+    def hint(self) -> None:
+        a = self.game.advice(H)
+        self.verdict.setText(f"Подсказка: {a.headline}")
+        self.verdict.setStyleSheet("font-size:17px; font-weight:bold; color:#ffd54f;")
+        self.bar.set_values(a.equity, a.required)
+        self.coach.setPlainText(explain(a))
+
+    def act(self, opt) -> None:
+        g = self.game
+        g.hero_act(opt)
+        d = g.last
+        if d.matched:
+            self.verdict.setText(f"✔ {STREET_RU[d.street]}: {d.chosen} — совпало с тренером")
+            color = "#66bb6a"
+        else:
+            self.verdict.setText(f"✘ {STREET_RU[d.street]}: вы — {d.chosen}, тренер — {d.advice.headline}")
+            color = "#ef5350"
+        self.verdict.setStyleSheet(f"font-size:17px; font-weight:bold; color:{color};")
+        self.bar.set_values(d.advice.equity, d.advice.required)
+        self.coach.setPlainText(explain(d.advice))
+        self.refresh()
+
+    def refresh(self) -> None:
+        g = self.game
+        while self.actions.count():
+            w = self.actions.takeAt(0).widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        for opt in g.options():
+            b = QPushButton(opt.label)
+            b.setMinimumHeight(38)
+            b.clicked.connect(lambda _=False, o=opt: self.act(o))
+            self.actions.addWidget(b)
+        self.btn_hint.setEnabled(not g.finished)
+        back = '<span style="background:#3a4c5f; color:#3a4c5f; font-size:26px;">&nbsp;??&nbsp;</span>'
+        vil = " ".join(card_html(c, 26) for c in g.cards[V]) if g.finished and any(
+            "Вскрытие" in x for x in g.log) else f"{back} {back}"
+        board = " ".join(card_html(c, 30) for c in g.board) or '<span style="color:#5c6b7a;">борд ещё не открыт</span>'
+        bets = ""
+        if g.inv[V] or g.inv[H]:
+            bets = f"<br><span style='color:#8fa3b8;'>ставки на улице: оппонент {g.inv[V]:g}, вы {g.inv[H]:g}</span>"
+        self.table.setText(
+            f"<p>Оппонент · {g.pos[V]} · стек {g.stack[V]:g} bb<br><br>{vil}</p>"
+            f"<p><br>{board}<br><br><span style='font-size:18px; color:#ffd54f;'>Банк {(g.final_pot if g.finished else g.pot):g} bb</span>{bets}</p>"
+            f"<p><br>{' '.join(card_html(c, 30) for c in g.cards[H])}<br><br>Вы · {g.pos[H]} · стек {g.stack[H]:g} bb</p>")
+        self.log.setPlainText("\n".join(g.log))
+        self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
+        if g.finished and not self.counted:
+            self.counted = True
+            self.hands += 1
+            self.total += g.net
+            if g.decisions:
+                ok = sum(d.matched for d in g.decisions)
+                lines = [f"{'✔' if d.matched else '✘'} {STREET_RU[d.street]}: вы — {d.chosen}; "
+                         f"тренер — {d.advice.headline}" for d in g.decisions]
+                self.coach.append(f"\n— Итог раздачи —\n{g.result}\nРешений по совету тренера: "
+                                  f"{ok} из {len(g.decisions)}\n" + "\n".join(lines))
+        self.score.setText(f"Сыграно раздач: {self.hands} · общий итог: {self.total:+g} bb")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Покерный тренер — 6-max NLHE, 100bb")
         tabs = QTabWidget()
         self.trainer = TrainerTab()
-        tabs.addTab(self.trainer, "Тренажёр")
+        self.game_tab = GameTab()
+        tabs.addTab(self.game_tab, "Игра против бота")
+        tabs.addTab(self.trainer, "Разбор ситуации")
         soon = QLabel("Разбор сессии по скриншотам и записи экрана — следующий этап.")
         soon.setAlignment(Qt.AlignCenter)
         tabs.addTab(soon, "Разбор сессии")
         self.setCentralWidget(tabs)
+        self.tabs = tabs
         self.resize(1180, 760)
 
 
