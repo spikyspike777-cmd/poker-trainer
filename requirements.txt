@@ -1,0 +1,4 @@
+eval7>=0.1.11
+pydantic>=2
+PySide6>=6.6
+pytest
