@@ -26,6 +26,7 @@ class Spot:
     stack: float
     hero_in_position: bool
     facing_bet: float = 0.0
+    oop_can_lead: bool = True      # может ли игрок без позиции поставить первым (False — «чек в агрессора»)
 
 
 @dataclass

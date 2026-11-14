@@ -321,12 +321,26 @@ def _mix_label(kind: str, amount: float | None, pot: float) -> str:
     return ACTION_RU[kind].lower()
 
 
+CHECK_TO_AGGRESSOR = True      # игрок без позиции не ставит первым, если последним ставил игрок в позиции
+
+
+def _oop_can_lead(s: GameState) -> bool:
+    """Игрок без позиции обычно чекает в того, кто ставил на прошлой улице, — убираем его ставку первым из дерева."""
+    if not CHECK_TO_AGGRESSOR:
+        return True
+    if s.to_call > 0 and s.in_position:
+        return True                            # оппонент без позиции уже поставил первым
+    oop = "villain" if s.in_position else "hero"
+    last = [who for st, who, k in s.history if st != s.street and k in ("bet", "raise")]
+    return not last or last[-1] == oop
+
+
 def _solve(s: GameState, a: Analysis, hero, board) -> None:
     """Если солвер умеет этот спот — заменить эвристический совет равновесной стратегией."""
     pot0 = s.pot - s.to_call                         # банк до ставки оппонента
     spot = Spot(hero=tuple(hero), board=board, hero_range=ranges.hero_range(s),
                 villain_range=ranges.villain_start(s), pot=pot0, stack=s.stack,
-                hero_in_position=s.in_position, facing_bet=s.to_call)
+                hero_in_position=s.in_position, facing_bet=s.to_call, oop_can_lead=_oop_can_lead(s))
     if not SOLVER.supports(spot) or not spot.villain_range:
         return
     res = SOLVER.solve(spot)

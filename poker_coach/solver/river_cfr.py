@@ -46,7 +46,7 @@ class RiverCFR:
             sizes.add(round(extra, 2))
         return sorted(s for s in sizes if s > 0)
 
-    def _build(self, pot: float, stack: float, extra: float) -> _Node:
+    def _build(self, pot: float, stack: float, extra: float, oop_can_lead: bool = True) -> _Node:
         def facing(player: int, c, raised: bool) -> _Node:
             me, opp = c[player], c[1 - player]
             n = _Node(player, c)
@@ -67,7 +67,7 @@ class RiverCFR:
             n = _Node(player)
             n.kinds, n.amounts = ["check"], [0.0]
             n.children = [opening(1) if player == 0 else _Node(terminal="show")]
-            for b in self._bets(pot, stack, extra):
+            for b in (self._bets(pot, stack, extra) if player == 1 or oop_can_lead else []):
                 c = (b, 0.0) if player == 0 else (0.0, b)
                 n.kinds.append("allin" if b == round(stack, 2) else "bet")
                 n.amounts.append(b)
@@ -86,7 +86,7 @@ class RiverCFR:
             hero_range.append(spot.hero)
         ranges[hero_p], ranges[1 - hero_p] = hero_range, list(spot.villain_range)
         key = (tuple(map(str, spot.board)), tuple(sorted(str(a) + str(b) for a, b in ranges[0])),
-               tuple(sorted(str(a) + str(b) for a, b in ranges[1])), spot.pot, spot.stack, spot.facing_bet)
+               tuple(sorted(str(a) + str(b) for a, b in ranges[1])), spot.pot, spot.stack, spot.facing_bet, spot.oop_can_lead)
         if key not in self._cache:
             self._cache[key] = self._run(ranges, spot)
         root, W, L, T, M = self._cache[key]
@@ -140,7 +140,7 @@ class RiverCFR:
         W = M * (s[0][:, None] > s[1][None, :])
         L = M * (s[0][:, None] < s[1][None, :])
         T = M - W - L
-        root = self._build(spot.pot, spot.stack, spot.facing_bet)
+        root = self._build(spot.pot, spot.stack, spot.facing_bet, spot.oop_can_lead)
         n = [len(ranges[0]), len(ranges[1])]
 
         def init(node: _Node) -> None:
