@@ -145,7 +145,7 @@ class Game:
 
     def advice(self, p: str = H) -> Analysis:
         st, o = self.state(p), self._other(p)
-        a = analyze(st)
+        a = analyze(st, use_table=p == H)        # бот играет по ручным чартам, герою советует таблица солвера
         if st.to_call > 0 and self.stack[o] == 0:            # оппонент в олл-ине: только колл или фолд
             if self.street == "preflop":
                 hero = to_eval7(self.cards[p])

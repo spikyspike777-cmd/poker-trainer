@@ -51,14 +51,32 @@ def test_validation():
 
 
 def test_preflop_chart_advice():
-    a = analyze(GameState(hero_cards="7c 2d", hero_pos="BTN", preflop_line="unopened", pot=1.5))
-    assert a.action == "fold"
-    a = analyze(GameState(hero_cards="As Ks", hero_pos="UTG", preflop_line="unopened", pot=1.5))
+    """Ручные чарты (use_table=False) — на них играют боты."""
+    hand = lambda **kw: analyze(GameState(**kw), use_table=False)
+    assert hand(hero_cards="7c 2d", hero_pos="BTN", preflop_line="unopened", pot=1.5).action == "fold"
+    a = hand(hero_cards="As Ks", hero_pos="UTG", preflop_line="unopened", pot=1.5)
     assert (a.action, a.amount) == ("raise", 2.5)
-    a = analyze(GameState(hero_cards="Ad Ah", hero_pos="BB", villain_pos="CO", preflop_line="vs_open", pot=4, to_call=1.5))
+    a = hand(hero_cards="Ad Ah", hero_pos="BB", villain_pos="CO", preflop_line="vs_open", pot=4, to_call=1.5)
     assert a.action == "raise" and a.amount == 10
-    a = analyze(GameState(hero_cards="Kd Kh", hero_pos="BTN", villain_pos="CO", preflop_line="vs_4bet", pot=33, to_call=14.5, stack=92.5))
+    a = hand(hero_cards="Kd Kh", hero_pos="BTN", villain_pos="CO", preflop_line="vs_4bet", pot=33, to_call=14.5, stack=92.5)
     assert a.action == "allin"
+
+
+def test_preflop_table_advice():
+    """Префлоп-таблица из решений солвера: стандартные линии, мультивей, лимп."""
+    a = analyze(GameState(hero_cards="7c 2d", hero_pos="BTN", preflop_line="unopened", pot=1.5))
+    assert a.action == "fold" and "солвер" in a.source
+    a = analyze(GameState(hero_cards="As Ks", hero_pos="UTG", preflop_line="unopened", pot=1.5))
+    assert a.action == "raise" and 2.0 <= a.amount <= 2.5
+    a = analyze(GameState(hero_cards="Ad Ah", hero_pos="BB", villain_pos="CO", preflop_line="vs_open", pot=4, to_call=1.5))
+    assert a.action == "raise" and a.equity > 0.8
+    multiway = dict(hero_pos="BB", preflop_line="other", pot=7.5, to_call=1.0, preflop_actions="UTG/2.0bb/CO/call/BTN/call")
+    assert analyze(GameState(hero_cards="As Ad", **multiway)).action == "raise"
+    assert analyze(GameState(hero_cards="7c 2d", **multiway)).action == "fold"
+    limp = dict(hero_pos="BB", preflop_line="other", pot=2.0, to_call=0, preflop_actions="SB/call")
+    assert analyze(GameState(hero_cards="7c 2d", **limp)).action in ("check", "raise")    # фолда быть не может
+    with pytest.raises(ValidationError):
+        GameState(hero_cards="As Ad", hero_pos="BB", preflop_line="other", pot=7.5)       # нет записи линии
 
 
 def test_postflop_advice():

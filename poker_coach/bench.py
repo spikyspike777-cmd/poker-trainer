@@ -152,55 +152,37 @@ def run_postflop(n: int, use_solver: bool, seed: int = 0, procs: int = 4):
 
 # ---------- префлоп ----------
 
-_SHOVE_CALL = {1: "TT+, AQs+, AKo", 2: "TT+, AQs+, AKo", 3: "QQ+, AKs, AKo"}
-
-
 def preflop_predict(row: dict) -> tuple[str, float | None, bool]:
-    """-> (fold/call/check/raise, размер рейза, покрыт ли спот штатной логикой тренера)."""
+    """-> (fold/call/check/raise/allin, размер рейза, стандартная ли это линия для ручных чартов)."""
     hero, cards = row["hero_pos"], _cards(row["hero_holding"])
     acts = _parse_line(row["prev_line"])
     raises = [(p, 100.0 if a == "allin" else float(a[:-2])) for p, a in acts if a.endswith("bb") or a == "allin"]
     allin = any(a == "allin" for _p, a in acts)
-    last_raise_i = max((i for i, (_p, a) in enumerate(acts) if a.endswith("bb") or a == "allin"), default=-1)
-    callers = [p for p, a in acts[last_raise_i + 1:] if a == "call"]
+    last_i = max((i for i, (_p, a) in enumerate(acts) if a.endswith("bb") or a == "allin"), default=-1)
+    callers = [p for p, a in acts[last_i + 1:] if a == "call"]
+    limpers = [p for p, a in acts if a == "call"] if not raises else []
     blind = {"SB": 0.5, "BB": 1.0}.get(hero, 0.0)
     hero_in = max([s for p, s in raises if p == hero], default=blind)
-    pot = float(row["pot_size"])
-    moves = ast.literal_eval(row["available_moves"])
     n = len(raises)
-
-    def run(line: L, villain: str | None, covered: bool = True):
-        to_call = 0 if line == L.UNOPENED else max(raises[-1][1] - hero_in, 0.1)
-        st = GameState(hero_cards=cards, hero_pos=hero, villain_pos=villain, preflop_line=line,
-                       pot=max(pot, to_call + 0.1), to_call=to_call, stack=100 - hero_in)
-        a = coach.analyze(st)
-        kind = "raise" if a.action in ("raise", "allin") else a.action
-        return kind, a.amount, covered
-
-    def simple(raise_rng: str, call_rng: str = ""):
-        if charts.in_range(cards, raise_rng):
-            return "raise", None, False
-        return ("call" if charts.in_range(cards, call_rng) else "fold"), None, False
-
-    if n == 0:
-        limpers = [p for p, a in acts if a == "call"]
-        if not limpers:
-            return run(L.UNOPENED, None)
-        if hero == "BB":                               # лимп до BB: рейз с сильными, иначе чек
-            kind, amt, _ = simple(charts.vs_open_ranges("BB", "SB")[0])
-            return ("check" if kind == "fold" else kind), amt, False
-        return simple(charts.RFI.get(hero, charts.RFI["BTN"]))     # изолейт против лимпа
-    if allin or n >= 4:
-        return simple("", _SHOVE_CALL.get(n, "KK+, AKs"))
-    last = raises[-1][0]
-    hero_raised = [p for p, _s in raises].count(hero)
-    if n == 1 and POSITIONS.index(last) < POSITIONS.index(hero):
-        return run(L.VS_OPEN, last, covered=not callers)
-    if n == 2 and raises[0][0] == hero and POSITIONS.index(hero) < POSITIONS.index(last):
-        return run(L.VS_3BET, last, covered=not callers)
-    if n == 3 and hero_raised == 1 and raises[1][0] == hero and POSITIONS.index(last) < POSITIONS.index(hero):
-        return run(L.VS_4BET, last)
-    return simple("KK+" if n >= 2 else "QQ+, AKs", "" if n >= 2 else "JJ-TT, AQs, AKo")
+    line, villain = L.OTHER, None
+    if n == 0 and not limpers and hero != "BB":
+        line = L.UNOPENED
+    elif not allin and not callers and n in (1, 2, 3):
+        last = raises[-1][0]
+        if n == 1 and POSITIONS.index(last) < POSITIONS.index(hero):
+            line, villain = L.VS_OPEN, last
+        elif n == 2 and raises[0][0] == hero and POSITIONS.index(hero) < POSITIONS.index(last):
+            line, villain = L.VS_3BET, last
+        elif n == 3 and raises[1][0] == hero and raises[0][0] == last and POSITIONS.index(last) < POSITIONS.index(hero):
+            line, villain = L.VS_4BET, last
+    to_call = 0.0 if line == L.UNOPENED else max((raises[-1][1] if raises else 1.0) - hero_in, 0.0)
+    pot = float(row["pot_size"])
+    st = GameState(hero_cards=cards, hero_pos=hero, villain_pos=villain, preflop_line=line,
+                   pot=max(pot, to_call + 0.1), to_call=to_call, stack=max(100 - hero_in, 0.5),
+                   hero_invested=0, preflop_actions=row["prev_line"])
+    a = coach.analyze(st)
+    kind = "raise" if a.action in ("raise", "allin") else a.action
+    return kind, a.amount, line != L.OTHER
 
 
 def run_preflop():
@@ -242,9 +224,9 @@ def report(pre, post) -> str:
         cov = [r for r in pre if r[0]]
         lines += [f"Префлоп ({n} спотов)",
                   f"  AA {_pct(sum(g == k for _c, g, k, _e in pre), n)}   EM {_pct(sum(e for *_x, e in pre), n)}",
-                  f"  штатная логика тренера покрывает {len(cov)} спотов: "
+                  f"  стандартные линии (открытие, против опена, 3-бета, 4-бета): {len(cov)} спотов, "
                   f"AA {_pct(sum(g == k for _c, g, k, _e in cov), len(cov))}; "
-                  f"остальные {n - len(cov)} (мультивей, лимпы, олл-ины) — упрощённые правила: "
+                  f"мультивей, лимпы, олл-ины: {n - len(cov)} спотов, "
                   f"AA {_pct(sum(g == k for c, g, k, _e in pre if not c), n - len(cov))}", ""]
     if post:
         n = len(post)
@@ -272,6 +254,8 @@ def main() -> None:
     p.add_argument("--n", type=int, default=2000, help="размер выборки постфлопа, 0 — все 10k")
     p.add_argument("--no-solver", action="store_true")
     p.add_argument("--no-history", action="store_true", help="не сужать диапазоны по истории ставок")
+    p.add_argument("--no-table", action="store_true", help="префлоп только по ручным чартам")
+    p.add_argument("--skip-postflop", action="store_true")
     p.add_argument("--skip-preflop", action="store_true")
     p.add_argument("--iterations", type=int, default=150)
     a = p.parse_args()
@@ -279,8 +263,9 @@ def main() -> None:
     USE_HISTORY = not a.no_history
     if coach.SOLVER is not None:
         coach.SOLVER.iterations = a.iterations
+    coach.USE_GTO_TABLE = not a.no_table
     pre = [] if a.skip_preflop else run_preflop()
-    post = run_postflop(a.n, not a.no_solver)
+    post = [] if a.skip_postflop else run_postflop(a.n, not a.no_solver)
     print(report(pre, post))
 
 

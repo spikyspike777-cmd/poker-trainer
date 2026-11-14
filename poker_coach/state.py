@@ -22,13 +22,15 @@ class PreflopLine(str, Enum):
     VS_OPEN = "vs_open"                      # оппонент открылся, ход героя
     VS_3BET = "vs_3bet"                      # герой открылся, оппонент 3-бет, ход героя
     VS_4BET = "vs_4bet"                      # герой 3-бет, оппонент 4-бет, ход героя
+    OTHER = "other"                          # любая другая префлоп-линия (лимпы, несколько игроков, олл-ины)
     HERO_OPEN_VILLAIN_CALL = "hero_open_villain_call"
     VILLAIN_OPEN_HERO_CALL = "villain_open_hero_call"
     HERO_3BET_VILLAIN_CALL = "hero_3bet_villain_call"
     VILLAIN_3BET_HERO_CALL = "villain_3bet_hero_call"
 
 
-PREFLOP_DECISIONS = {PreflopLine.UNOPENED, PreflopLine.VS_OPEN, PreflopLine.VS_3BET, PreflopLine.VS_4BET}
+PREFLOP_DECISIONS = {PreflopLine.UNOPENED, PreflopLine.VS_OPEN, PreflopLine.VS_3BET, PreflopLine.VS_4BET,
+                     PreflopLine.OTHER}
 
 VILLAIN_OPENED = {PreflopLine.VS_OPEN, PreflopLine.VS_4BET, PreflopLine.VILLAIN_OPEN_HERO_CALL,
                   PreflopLine.HERO_3BET_VILLAIN_CALL}
@@ -76,6 +78,8 @@ class GameState(BaseModel):
         default_factory=list,
         description="Постфлоп-действия по порядку: (улица flop/turn/river, hero/villain, check/bet/raise/call)")
 
+    preflop_actions: str | None = Field(
+        default=None, description="Префлоп-действия до героя в нотации PokerBench: 'UTG/2.0bb/BTN/call'")
     villain_adj: Adjust | None = Field(default=None, description="Поправки на профиль оппонента")
 
     @field_validator("hero_cards", "board", mode="before")
@@ -95,7 +99,10 @@ class GameState(BaseModel):
             raise ValueError("Одна и та же карта указана дважды")
         if self.hero_pos not in POSITIONS:
             raise ValueError(f"Позиция героя должна быть одной из {POSITIONS}")
-        if self.preflop_line != PreflopLine.UNOPENED:
+        if self.preflop_line == PreflopLine.OTHER:
+            if self.preflop_actions is None:
+                raise ValueError("Для нестандартной префлоп-линии нужна запись действий до героя")
+        elif self.preflop_line != PreflopLine.UNOPENED:
             if self.villain_pos not in POSITIONS:
                 raise ValueError("Укажите позицию оппонента")
             if self.villain_pos == self.hero_pos:
