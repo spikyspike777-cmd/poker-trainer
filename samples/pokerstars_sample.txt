@@ -1,0 +1,86 @@
+PokerStars Hand #250000000001:  Hold'em No Limit ($0.05/$0.10 USD) - 2026/11/10 20:01:10 ET
+Table 'Sample I' 6-max Seat #3 is the button
+Seat 1: Alfa ($10 in chips)
+Seat 2: Bravo ($10 in chips)
+Seat 3: Hero ($10 in chips)
+Seat 4: Delta ($10 in chips)
+Seat 5: Echo ($10 in chips)
+Seat 6: Fox ($10 in chips)
+Delta: posts small blind $0.05
+Echo: posts big blind $0.10
+*** HOLE CARDS ***
+Dealt to Hero [Ah Qh]
+Fox: folds
+Alfa: folds
+Bravo: folds
+Hero: raises $0.15 to $0.25
+Delta: folds
+Echo: calls $0.15
+*** FLOP *** [Kh 7h 2c]
+Echo: checks
+Hero: bets $0.30
+Echo: calls $0.30
+*** TURN *** [Kh 7h 2c] [9s]
+Echo: checks
+Hero: checks
+*** RIVER *** [Kh 7h 2c 9s] [3d]
+Echo: bets $0.80
+Hero: calls $0.80
+*** SHOW DOWN ***
+Echo: shows [Kd Jd] (a pair of Kings)
+Hero: mucks hand
+Echo collected $2.65 from pot
+*** SUMMARY ***
+Total pot $2.75 | Rake $0.10
+
+PokerStars Hand #250000000002:  Hold'em No Limit ($0.05/$0.10 USD) - 2026/11/10 20:02:30 ET
+Table 'Sample I' 6-max Seat #4 is the button
+Seat 1: Alfa ($10 in chips)
+Seat 2: Bravo ($10 in chips)
+Seat 3: Hero ($8.65 in chips)
+Seat 4: Delta ($9.95 in chips)
+Seat 5: Echo ($11.30 in chips)
+Seat 6: Fox ($10 in chips)
+Echo: posts small blind $0.05
+Fox: posts big blind $0.10
+*** HOLE CARDS ***
+Dealt to Hero [7c 2d]
+Alfa: folds
+Bravo: folds
+Hero: raises $0.15 to $0.25
+Delta: folds
+Echo: folds
+Fox: folds
+Uncalled bet ($0.15) returned to Hero
+Hero collected $0.25 from pot
+*** SUMMARY ***
+Total pot $0.25 | Rake $0
+
+PokerStars Hand #250000000003:  Hold'em No Limit ($0.05/$0.10 USD) - 2026/11/10 20:03:40 ET
+Table 'Sample I' 6-max Seat #5 is the button
+Seat 1: Alfa ($10 in chips)
+Seat 2: Bravo ($10 in chips)
+Seat 3: Hero ($8.75 in chips)
+Seat 4: Delta ($9.95 in chips)
+Seat 5: Echo ($11.25 in chips)
+Seat 6: Fox ($9.90 in chips)
+Fox: posts small blind $0.05
+Alfa: posts big blind $0.10
+*** HOLE CARDS ***
+Dealt to Hero [Js Jd]
+Bravo: raises $0.15 to $0.25
+Hero: raises $0.50 to $0.75
+Delta: folds
+Echo: folds
+Fox: folds
+Alfa: folds
+Bravo: calls $0.50
+*** FLOP *** [Ac 8d 4s]
+Bravo: checks
+Hero: bets $0.55
+Bravo: raises $1.10 to $1.65
+Hero: folds
+Uncalled bet ($1.10) returned to Bravo
+Bravo collected $2.65 from pot
+*** SUMMARY ***
+Total pot $2.75 | Rake $0.10

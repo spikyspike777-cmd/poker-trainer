@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import eval7
 
 from . import calc, charts
-from .coach import Analysis, analyze
+from .coach import Analysis, analyze, matches
 from .state import POSITIONS, POSTFLOP_ORDER, RANKS, SUITS, GameState, PreflopLine as L, to_eval7
 
 H, V = "H", "V"
@@ -175,9 +175,7 @@ class Game:
 
     def hero_act(self, opt: Option) -> None:
         adv = self.advice(H)
-        matched = _group(opt.kind) == _group(adv.action)
-        if adv.mix:      # солвер смешивает: решение верное, если он сам так играет хотя бы в 15% случаев
-            matched = sum(f for k, _a, f, _e in adv.mix if _group(k) == _group(opt.kind)) >= 0.15
+        matched = matches(adv, opt.kind)
         d = Decision(self.street, opt.label, adv, matched)
         self.decisions.append(d)
         self.last = d

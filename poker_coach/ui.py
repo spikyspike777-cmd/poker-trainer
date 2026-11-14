@@ -4,17 +4,20 @@ from __future__ import annotations
 import sys
 
 from pydantic import ValidationError
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QMainWindow, QPushButton, QRadioButton, QTabWidget,
-    QTextEdit, QVBoxLayout, QWidget,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QMainWindow, QPushButton, QRadioButton,
+    QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from . import charts, ranges
 from .coach import Analysis, analyze, explain
 from .engine import STREET_RU, Game, H, V
+from .hh import review_session
 from .scenarios import random_state
 from .state import LINE_LABELS, POSITIONS, PREFLOP_DECISIONS, RANKS, GameState, PreflopLine
 
@@ -384,9 +387,13 @@ class GameTab(QWidget):
         left.addLayout(self.actions)
         row = QHBoxLayout()
         self.btn_hint = QPushButton("Подсказка тренера")
+        self.btn_overlay = QPushButton("Оверлей")
+        self.btn_overlay.setToolTip("Компактное окно тренера поверх остальных окон")
+        self.overlay = Overlay()
         self.btn_new = QPushButton("Новая раздача")
         self.btn_new.setObjectName("primary")
         row.addWidget(self.btn_hint)
+        row.addWidget(self.btn_overlay)
         row.addWidget(self.btn_new)
         left.addLayout(row)
         lbox = QGroupBox("Ход раздачи")
@@ -414,7 +421,31 @@ class GameTab(QWidget):
 
         self.btn_new.clicked.connect(self.new_hand)
         self.btn_hint.clicked.connect(self.hint)
+        self.btn_overlay.clicked.connect(self.toggle_overlay)
+        self.overlay.live.toggled.connect(lambda _on: self.update_overlay())
         self.refresh()
+
+    def toggle_overlay(self) -> None:
+        if self.overlay.isVisible():
+            self.overlay.hide()
+            return
+        self.overlay.show()
+        self.update_overlay()
+
+    def update_overlay(self) -> None:
+        """Оверлей показывает оценку последнего решения, а при включённой галочке — совет на текущий ход."""
+        if not self.overlay.isVisible():
+            return
+        g = self.game
+        if not g.finished and self.overlay.live.isChecked():
+            a = g.advice(H)
+            self.overlay.show_advice(f"Совет: {a.headline}", a, "#ffd54f")
+        elif g.last is not None:
+            d = g.last
+            title = (f"✔ {d.chosen} — верно" if d.matched else f"✘ Вы — {d.chosen}, тренер — {d.advice.headline}")
+            self.overlay.show_advice(title, d.advice, "#66bb6a" if d.matched else "#ef5350")
+        else:
+            self.overlay.show_text("Ваш ход" if not g.finished else g.result)
 
     def new_hand(self) -> None:
         self.game.new_hand()
@@ -484,6 +515,189 @@ class GameTab(QWidget):
                 self.coach.append(f"\n— Итог раздачи —\n{g.result}\nРешений по совету тренера: "
                                   f"{ok} из {len(g.decisions)}\n" + "\n".join(lines))
         self.score.setText(f"Сыграно раздач: {self.hands} · общий итог: {self.total:+g} bb")
+        self.update_overlay()
+
+
+class Overlay(QWidget):
+    """Компактное окно тренера поверх остальных окон. Данные получает только от своего стола."""
+
+    def __init__(self):
+        super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setObjectName("overlay")
+        self.setStyleSheet("#overlay { border: 1px solid #4caf50; }")
+        self.setFixedWidth(360)
+        lay = QVBoxLayout(self)
+        head = QHBoxLayout()
+        title = QLabel("Тренер · свой стол")
+        title.setStyleSheet("color:#8fa3b8; font-size:11px;")
+        self.live = QCheckBox("подсказывать до хода")
+        self.live.setStyleSheet("font-size:11px;")
+        close = QPushButton("x")
+        close.setFixedSize(22, 22)
+        close.clicked.connect(self.hide)
+        head.addWidget(title)
+        head.addStretch()
+        head.addWidget(self.live)
+        head.addWidget(close)
+        lay.addLayout(head)
+        self.headline = QLabel("—")
+        self.headline.setWordWrap(True)
+        self.headline.setStyleSheet("font-size:16px; font-weight:bold;")
+        self.bar = EquityBar()
+        self.body = QLabel()
+        self.body.setWordWrap(True)
+        self.body.setStyleSheet("font-size:12px;")
+        lay.addWidget(self.headline)
+        lay.addWidget(self.bar)
+        lay.addWidget(self.body)
+        self._drag = None
+
+    def show_advice(self, title: str, a: Analysis, color: str = "#e6edf3") -> None:
+        self.headline.setText(title)
+        self.headline.setStyleSheet(f"font-size:16px; font-weight:bold; color:{color};")
+        self.bar.set_values(a.equity, a.required)
+        self.body.setText("\n".join(f"• {r}" for r in a.reasons[:3]))
+        self.adjustSize()
+
+    def show_text(self, title: str) -> None:
+        self.headline.setText(title)
+        self.headline.setStyleSheet("font-size:16px; font-weight:bold;")
+        self.bar.set_values(None, 0)
+        self.body.setText("")
+        self.adjustSize()
+
+    def mousePressEvent(self, e) -> None:
+        self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, e) -> None:
+        if self._drag is not None:
+            self.move(e.globalPosition().toPoint() - self._drag)
+
+    def mouseReleaseEvent(self, _e) -> None:
+        self._drag = None
+
+
+class SessionTab(QWidget):
+    """Разбор сыгранной сессии по hand history (формат PokerStars)."""
+
+    SAMPLE = Path(__file__).resolve().parent.parent / "samples" / "pokerstars_sample.txt"
+
+    def __init__(self):
+        super().__init__()
+        self.items: list = []
+        root = QHBoxLayout(self)
+        left, right = QVBoxLayout(), QVBoxLayout()
+        root.addLayout(left, 1)
+        root.addLayout(right, 1)
+        row = QHBoxLayout()
+        for text, fn in (("Открыть файл…", self.open_file), ("Вставить из буфера", self.paste),
+                         ("Пример сессии", self.load_sample)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        left.addLayout(row)
+        self.summary = QLabel("Загрузите hand history PokerStars: файл .txt или текст из буфера обмена.")
+        self.summary.setWordWrap(True)
+        left.addWidget(self.summary)
+        self.list = QListWidget()
+        self.list.setStyleSheet("QListWidget { background:#101820; border:1px solid #2f3d4c; } "
+                                "QListWidget::item { padding:5px; } QListWidget::item:selected { background:#2f4257; }")
+        left.addWidget(self.list, 1)
+        self.only_errors = QCheckBox("Показывать только расхождения с тренером")
+        left.addWidget(self.only_errors)
+
+        self.cards = QLabel()
+        self.cards.setTextFormat(Qt.RichText)
+        self.cards.setMinimumHeight(40)
+        self.verdict = QLabel()
+        self.verdict.setWordWrap(True)
+        self.verdict.setStyleSheet("font-size:17px; font-weight:bold;")
+        self.bar = EquityBar()
+        right.addWidget(self.cards)
+        right.addWidget(self.verdict)
+        right.addWidget(self.bar)
+        mid = QHBoxLayout()
+        rbox = QGroupBox("Диапазон оппонента")
+        rl = QVBoxLayout(rbox)
+        self.matrix = RangeMatrix()
+        rl.addWidget(self.matrix)
+        rl.addStretch()
+        rbox.setFixedWidth(13 * RangeMatrix.CELL + 30)
+        tbox = QGroupBox("Разбор тренера")
+        tl = QVBoxLayout(tbox)
+        self.text = QTextEdit()
+        self.text.setReadOnly(True)
+        tl.addWidget(self.text)
+        mid.addWidget(rbox, 0)
+        mid.addWidget(tbox, 1)
+        right.addLayout(mid, 1)
+        self.hands: list = []
+        self.list.currentRowChanged.connect(self.show_item)
+        self.only_errors.toggled.connect(self.fill)
+
+    def open_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Hand history", "", "Текст (*.txt);;Все файлы (*)")
+        if path:
+            self.load_text(Path(path).read_text(encoding="utf-8", errors="replace"))
+
+    def paste(self) -> None:
+        self.load_text(QApplication.clipboard().text())
+
+    def load_sample(self) -> None:
+        self.load_text(self.SAMPLE.read_text(encoding="utf-8"))
+
+    def load_text(self, text: str) -> None:
+        self.hands = review_session(text)
+        self.fill()
+
+    def fill(self) -> None:
+        self.list.clear()
+        self.items = []
+        rated = [d for h in self.hands for d in h.decisions if d.matched is not None]
+        skipped = sum(1 for h in self.hands for d in h.decisions if d.matched is None)
+        if not self.hands:
+            self.summary.setText("Раздач не найдено. Нужен текст hand history PokerStars (Hold'em No Limit).")
+            return
+        ok = sum(d.matched for d in rated)
+        net = sum(h.net_bb for h in self.hands)
+        self.summary.setText(
+            f"Раздач: {len(self.hands)} · итог {net:+g} bb · решений с оценкой: {len(rated)}, "
+            f"по совету тренера {ok} ({100 * ok / max(len(rated), 1):.0f}%) · без оценки: {skipped}")
+        for n, h in enumerate(self.hands, 1):
+            for d in h.decisions:
+                if self.only_errors.isChecked() and d.matched is not False:
+                    continue
+                mark = "✔" if d.matched else "✘" if d.matched is False else "?"
+                tail = f"тренер: {d.advice.headline}" if d.advice else "без оценки"
+                self.list.addItem(f"{mark}  №{n} · {' '.join(h.hero_cards)} · {h.hero_pos} · "
+                                  f"{STREET_RU[d.street]}: {d.actual} — {tail}")
+                self.items.append((h, d))
+        if self.items:
+            self.list.setCurrentRow(0)
+
+    def show_item(self, row: int) -> None:
+        if not 0 <= row < len(self.items):
+            return
+        h, d = self.items[row]
+        board = d.state.board if d.state else []
+        self.cards.setText(f"Рука: {' '.join(card_html(c) for c in h.hero_cards)} &nbsp;&nbsp; Борд: "
+                           + (" ".join(card_html(c) for c in board) or "— (префлоп)")
+                           + f" &nbsp;&nbsp; итог раздачи {h.net_bb:+g} bb")
+        if d.advice is None:
+            self.verdict.setText("Без оценки")
+            self.verdict.setStyleSheet("font-size:17px; font-weight:bold; color:#8fa3b8;")
+            self.bar.set_values(None, 0)
+            self.matrix.set_data({}, None)
+            self.text.setPlainText(d.note)
+            return
+        if d.matched:
+            self.verdict.setText(f"✔ {STREET_RU[d.street]}: {d.actual} — совпало с тренером")
+        else:
+            self.verdict.setText(f"✘ {STREET_RU[d.street]}: вы — {d.actual}, тренер — {d.advice.headline}")
+        self.verdict.setStyleSheet(f"font-size:17px; font-weight:bold; color:{'#66bb6a' if d.matched else '#ef5350'};")
+        self.bar.set_values(d.advice.equity, d.advice.required)
+        self.matrix.set_data(ranges.matrix(d.advice.villain), charts.hand_key(h.hero_cards))
+        self.text.setPlainText(explain(d.advice))
 
 
 class MainWindow(QMainWindow):
@@ -495,9 +709,8 @@ class MainWindow(QMainWindow):
         self.game_tab = GameTab()
         tabs.addTab(self.game_tab, "Игра против бота")
         tabs.addTab(self.trainer, "Разбор ситуации")
-        soon = QLabel("Разбор сессии по скриншотам и записи экрана — следующий этап.")
-        soon.setAlignment(Qt.AlignCenter)
-        tabs.addTab(soon, "Разбор сессии")
+        self.session = SessionTab()
+        tabs.addTab(self.session, "Разбор сессии")
         self.setCentralWidget(tabs)
         self.tabs = tabs
         self.resize(1180, 760)

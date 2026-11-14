@@ -44,6 +44,20 @@ class Analysis:
         return s
 
 
+def _group(kind: str) -> str:
+    return {"fold": "fold", "check": "passive", "call": "passive"}.get(kind, "aggressive")
+
+
+def matches(a: Analysis, kind: str) -> bool:
+    """Совпадает ли действие игрока (fold/check/call/bet/raise) с советом по типу.
+
+    Если солвер смешивает, верным считается любое действие, которое он сам выбирает хотя бы в 15% случаев.
+    """
+    if a.mix:
+        return sum(f for k, _a, f, _e in a.mix if _group(k) == _group(kind)) >= 0.15
+    return _group(kind) == _group(a.action)
+
+
 def analyze(state: GameState) -> Analysis:
     hero, board = to_eval7(state.hero_cards), to_eval7(state.board)
     vr = ranges.villain_range(state)
@@ -226,7 +240,7 @@ def _solve(s: GameState, a: Analysis, hero, board) -> None:
         r.append("Фолд: против его диапазона ставки эта рука выигрывает слишком редко.")
     r.append(f"Вы {'в позиции' if s.in_position else 'без позиции'}; SPR (стек к банку) = {a.spr:.1f}.")
     a.reasons = r
-    a.source = f"{res.name}; диапазоны на входе — по префлоп-чартам"
+    a.source = f"{res.name}; диапазоны на входе — по префлоп-чартам и ставкам на прошлых улицах"
 
 
 def explain(a: Analysis) -> str:
