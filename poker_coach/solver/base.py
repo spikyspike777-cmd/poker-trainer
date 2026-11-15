@@ -29,6 +29,9 @@ class Spot:
     oop_can_lead: bool = True      # может ли игрок без позиции поставить первым (False — «чек в агрессора»)
     hero_weights: list[float] | None = None      # веса рук в диапазонах (None — все равны)
     villain_weights: list[float] | None = None
+    # действия на текущей улице до хода героя, по порядку: (1, 0) чек, (2, 0) колл, (3, сумма) ставка или рейз;
+    # None — линия восстанавливается по facing_bet
+    path: list[tuple[int, float]] | None = None
 
 
 @dataclass

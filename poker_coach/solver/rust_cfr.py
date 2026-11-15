@@ -46,6 +46,8 @@ class RustCFR:
     def available() -> bool:
         return solver_rs is not None
 
+    supports_path = True      # умеет решать споты, где герой уже ставил на этой улице
+
     def supports(self, spot: Spot) -> bool:
         streets = (3, 4, 5) if self.solve_flop else (4, 5)
         return (solver_rs is not None and len(spot.board) in streets and spot.stack > 0
@@ -117,7 +119,9 @@ class RustCFR:
         ranges[hero_p], ranges[1 - hero_p] = hero_range, list(spot.villain_range)
         weights[hero_p], weights[1 - hero_p] = hw, vw
         hero_i = next(i for i, c in enumerate(hero_range) if set(c) == set(spot.hero))
-        if hero_p == 1 and spot.facing_bet == 0:
+        if spot.path is not None:
+            path = list(spot.path)
+        elif hero_p == 1 and spot.facing_bet == 0:
             path = [CHECK]
         elif hero_p == 1:
             path = [(BET, spot.facing_bet)]
@@ -125,7 +129,8 @@ class RustCFR:
             path = [CHECK, (BET, spot.facing_bet)]
         else:
             path = []
-        acts, equity, w, _r0, _r1 = self._run(spot.board, ranges, weights, spot.pot, spot.stack, spot.facing_bet,
+        extra = next((a for k, a in path if k == BET), 0.0)      # первая ставка линии должна быть в дереве
+        acts, equity, w, _r0, _r1 = self._run(spot.board, ranges, weights, spot.pot, spot.stack, extra,
                                               spot.oop_can_lead, hero_p, hero_i, path)
         return SolverResult([ActionFreq(_KINDS[k], amt, f, ev) for k, amt, f, ev in acts], equity,
                             ranges[1 - hero_p], list(w), self.name)

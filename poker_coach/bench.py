@@ -24,9 +24,6 @@ from .state import POSITIONS, POSTFLOP_ORDER, GameState, PreflopLine as L
 DATA = Path(__file__).resolve().parent.parent / "data" / "pokerbench"
 URL = "https://huggingface.co/datasets/RZ412/PokerBench/resolve/main/"
 USE_HISTORY = True
-CHART_RANGES = False
-SOLVED = False
-NO_FLOP = False
 PRE = "preflop_1k_test_set_game_scenario_information.csv"
 POST = "postflop_10k_test_set_game_scenario_information.csv"
 
@@ -115,9 +112,8 @@ def _nearest(amount: float | None, options: list[float]) -> float | None:
     return min(options, key=lambda x: abs(x - amount))
 
 
-def postflop_predict(row: dict) -> tuple[str, str]:
-    """-> (тип действия, точная метка в формате датасета)."""
-    a = coach.analyze(postflop_state(row))
+def _label(a, row: dict) -> tuple[str, str]:
+    """Совет тренера -> (тип действия, точная метка в формате датасета)."""
     moves = ast.literal_eval(row["available_moves"])
     kinds = {m.split()[0].lower() for m in moves}
     kind = a.action
@@ -132,34 +128,60 @@ def postflop_predict(row: dict) -> tuple[str, str]:
     return kind, kind
 
 
+def postflop_predict(row: dict) -> tuple[str, str]:
+    return _label(coach.analyze(postflop_state(row)), row)
+
+
+OPTS: dict = {}       # настройки прогона: передаются в рабочие процессы
+
+
 def _post_job(args):
-    row, use_solver, use_history, chart_ranges, solved, no_flop = args
+    row, o = args
     from .params import P
-    P["table_ranges"] = 0 if chart_ranges else P["table_ranges"]
-    P["solved_ranges"] = 1 if solved else 0
-    if no_flop and coach.SOLVER is not None and hasattr(coach.SOLVER, "solve_flop"):
-        coach.SOLVER.solve_flop = False
-    global USE_HISTORY
-    USE_HISTORY = use_history
-    if not use_solver:
+    USE_HISTORY_set(o)
+    P["table_ranges"] = 0 if o.get("chart_ranges") else P["table_ranges"]
+    P["solved_ranges"] = 1 if o.get("solved") else 0
+    P.update(o.get("params", {}))
+    if not o.get("solver", True):
         coach.SOLVER = None
+    elif coach.SOLVER is not None:
+        for k, v in o.get("solver_args", {}).items():
+            setattr(coach.SOLVER, k, tuple(v) if isinstance(v, list) else v)
+        if o.get("no_flop") and hasattr(coach.SOLVER, "solve_flop"):
+            coach.SOLVER.solve_flop = False
+    top = None
     try:
-        kind, label = postflop_predict(row)
+        a = coach.analyze(postflop_state(row))
+        kind, label = _label(a, row)
+        top = a.mix[0][2] if a.mix else None
     except Exception as e:                             # спот не разобрался — считаем ошибкой
         kind, label = "error", f"error: {type(e).__name__}: {e}"
     gold = row["correct_decision"].lower()
     g = gold.split()
     gold_label = f"{g[0]} {float(g[1]):g}" if len(g) > 1 else gold
-    return row["evaluation_at"], g[0], kind, label == gold_label, label
+    return row["evaluation_at"], g[0], kind, label == gold_label, label, top
 
 
-def run_postflop(n: int, use_solver: bool, seed: int = 0, procs: int = 4):
-    rows = load(POST)
+def USE_HISTORY_set(o) -> None:
+    global USE_HISTORY
+    USE_HISTORY = o.get("history", True)
+
+
+def run_postflop(n: int, opts: dict, seed: int = 0, procs: int = 4):
+    rows = load(POST) if not opts.get("train") else _train_rows()
+    if opts.get("street"):
+        rows = [r for r in rows if r["evaluation_at"] == opts["street"]]
     if n and n < len(rows):
         rows = random.Random(seed).sample(rows, n)
     with Pool(procs) as pool:
-        res = pool.map(_post_job, [(r, use_solver, USE_HISTORY, CHART_RANGES, SOLVED, NO_FLOP) for r in rows], chunksize=8)
-    return res
+        return pool.map(_post_job, [(r, opts) for r in rows], chunksize=4)
+
+
+def _train_rows() -> list[dict]:
+    """Случайные 20 000 строк обучающей части постфлопа (для выбора настроек без подгонки под тест)."""
+    from .tune import TRAIN, load_train
+    fit, hold = load_train(10000, seed=11)
+    return fit + hold
 
 
 # ---------- префлоп ----------
@@ -243,17 +265,25 @@ def report(pre, post) -> str:
     if post:
         n = len(post)
         lines.append(f"Постфлоп ({n} спотов)")
-        lines.append(f"  AA {_pct(sum(g == k for _s, g, k, _e, _l in post), n)}   "
-                     f"EM {_pct(sum(e for _s, _g, _k, e, _l in post), n)}")
+        lines.append(f"  AA {_pct(sum(r[1] == r[2] for r in post), n)}   EM {_pct(sum(r[3] for r in post), n)}")
         by = defaultdict(list)
         for r in post:
             by[r[0]].append(r)
         for st in ("Flop", "Turn", "River"):
             rs = by.get(st, [])
-            lines.append(f"  {st:5} n={len(rs):5}  AA {_pct(sum(g == k for _s, g, k, _e, _l in rs), len(rs))}")
-        gold = Counter(g for _s, g, *_r in post)
+            lines.append(f"  {st:5} n={len(rs):5}  AA {_pct(sum(r[1] == r[2] for r in rs), len(rs))}")
+        gold = Counter(r[1] for r in post)
         lines.append("  по правильному действию: " + ", ".join(
-            f"{g} {_pct(sum(1 for _s, gg, k, *_r in post if gg == g and k == g), c).strip()}" for g, c in gold.most_common()))
+            f"{g} {_pct(sum(1 for r in post if r[1] == g and r[2] == g), c).strip()}" for g, c in gold.most_common()))
+        solved = [r for r in post if r[5] is not None]
+        if solved:
+            sure = [r for r in solved if r[5] >= 0.8]
+            mixed = [r for r in solved if r[5] < 0.8]
+            lines.append(f"  решено солвером: {len(solved)} спотов; где он уверен (частота действия от 80%): "
+                         f"n={len(sure)}, AA {_pct(sum(r[1] == r[2] for r in sure), len(sure)).strip()}; "
+                         f"где смешивает: n={len(mixed)}, AA {_pct(sum(r[1] == r[2] for r in mixed), len(mixed)).strip()}")
+            rest = [r for r in post if r[5] is None]
+            lines.append(f"  эвристикой: n={len(rest)}, AA {_pct(sum(r[1] == r[2] for r in rest), len(rest)).strip()}")
         errs = sum(1 for r in post if r[2] == "error")
         if errs:
             ex = next(r[4] for r in post if r[2] == "error")
@@ -262,27 +292,31 @@ def report(pre, post) -> str:
 
 
 def main() -> None:
+    import json
     p = argparse.ArgumentParser()
-    p.add_argument("--n", type=int, default=2000, help="размер выборки постфлопа, 0 — все 10k")
+    p.add_argument("--n", type=int, default=2000, help="размер выборки постфлопа, 0 — все")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--train", action="store_true", help="постфлоп из обучающей части (для выбора настроек)")
+    p.add_argument("--street", choices=["Flop", "Turn", "River"])
     p.add_argument("--no-solver", action="store_true")
-    p.add_argument("--no-history", action="store_true", help="не сужать диапазоны по истории ставок")
-    p.add_argument("--solved-ranges", action="store_true", help="диапазоны из решения прошлых улиц солвером")
     p.add_argument("--no-flop", action="store_true", help="флоп — эвристикой")
-    p.add_argument("--chart-ranges", action="store_true", help="диапазоны только по ручным чартам")
+    p.add_argument("--no-solved-ranges", action="store_true", help="диапазоны по правилам сужения, без решения прошлых улиц")
+    p.add_argument("--chart-ranges", action="store_true", help="стартовые диапазоны только по ручным чартам")
+    p.add_argument("--no-history", action="store_true", help="не учитывать историю ставок")
     p.add_argument("--no-table", action="store_true", help="префлоп только по ручным чартам")
+    p.add_argument("--solver-args", default="{}", help='настройки солвера в JSON, например {"turn_sizes": [0.66]}')
+    p.add_argument("--set", action="append", default=[], help="параметр из params.py: имя=значение")
     p.add_argument("--skip-postflop", action="store_true")
     p.add_argument("--skip-preflop", action="store_true")
-    p.add_argument("--iterations", type=int, default=150)
     a = p.parse_args()
-    global USE_HISTORY
-    USE_HISTORY = not a.no_history
-    if coach.SOLVER is not None:
-        coach.SOLVER.iterations = a.iterations
+    from .params import P
+    opts = dict(solver=not a.no_solver, history=not a.no_history, chart_ranges=a.chart_ranges,
+                solved=bool(P["solved_ranges"]) and not a.no_solved_ranges, no_flop=a.no_flop, train=a.train,
+                street=a.street, solver_args=json.loads(a.solver_args),
+                params={k: float(v) for k, v in (x.split("=") for x in a.set)})
     coach.USE_GTO_TABLE = not a.no_table
-    global CHART_RANGES, SOLVED, NO_FLOP
-    CHART_RANGES, SOLVED, NO_FLOP = a.chart_ranges, a.solved_ranges, a.no_flop
     pre = [] if a.skip_preflop else run_preflop()
-    post = [] if a.skip_postflop else run_postflop(a.n, not a.no_solver)
+    post = [] if a.skip_postflop else run_postflop(a.n, opts, seed=a.seed)
     print(report(pre, post))
 
 

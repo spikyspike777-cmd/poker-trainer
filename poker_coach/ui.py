@@ -7,7 +7,7 @@ import sys
 from pydantic import ValidationError
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
@@ -363,6 +363,17 @@ class TrainerTab(QWidget):
         self.text.setPlainText(msg)
 
 
+class _Job(QThread):
+    """Тяжёлый расчёт (ходы ботов, совет тренера) в фоновом потоке, чтобы окно не замирало."""
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self.fn, self.result = fn, None
+
+    def run(self) -> None:
+        self.result = self.fn()
+
+
 class GameTab(QWidget):
     """Стол на 2–6 игроков: решение на каждой улице и комментарий тренера."""
 
@@ -373,6 +384,10 @@ class GameTab(QWidget):
         self.total = 0.0
         self.counted = False
         self.revealed = False
+        self.sync = False          # True — считать прямо в потоке окна (для скриптов и тестов)
+        self.busy = False
+        self._job = None
+        self._hint = None          # совет тренера на текущий ход (считается один раз)
         root = QHBoxLayout(self)
         left, right = QVBoxLayout(), QVBoxLayout()
         root.addLayout(left, 1)
@@ -468,12 +483,46 @@ class GameTab(QWidget):
         self.overlay.live.toggled.connect(lambda _on: self.update_overlay())
         self.refresh()
 
+    def _run(self, fn, done, wait_text: str) -> None:
+        """Выполнить fn в фоне и затем done(результат); пока считается — кнопки выключены."""
+        if self.busy:
+            return
+        if self.sync:
+            done(fn())
+            return
+        self.busy = True
+        self.verdict.setText(wait_text)
+        self.verdict.setStyleSheet("font-size:17px; font-weight:bold; color:#8fa3b8;")
+        self._set_enabled(False)
+        job = _Job(fn, self)
+
+        def finish() -> None:
+            self.busy = False
+            self._set_enabled(True)
+            done(job.result)
+
+        job.finished.connect(finish)
+        self._job = job
+        job.start()
+
+    def _set_enabled(self, on: bool) -> None:
+        for w in (self.btn_new, self.btn_hint, self.count, self.style, self.use_profile, self.adaptive):
+            w.setEnabled(on)
+        for i in range(self.actions.count()):
+            w = self.actions.itemAt(i).widget()
+            if w:
+                w.setEnabled(on)
+
     def reseat(self) -> None:
         """Сменить число игроков или характеры: профили и счёт начинаются заново."""
         self.revealed = False
-        self.game.setup(self.count.currentData(), self.style.currentData())
-        self.hands, self.total = 0, 0.0
-        self.new_hand_ui()
+        n, style = self.count.currentData(), self.style.currentData()
+
+        def done(_r) -> None:
+            self.hands, self.total = 0, 0.0
+            self.new_hand_ui()
+
+        self._run(lambda: self.game.setup(n, style), done, "Рассаживаю игроков…")
 
     def reveal(self) -> None:
         self.revealed = True
@@ -492,8 +541,10 @@ class GameTab(QWidget):
             return
         g = self.game
         if not g.finished and self.overlay.live.isChecked():
-            a = g.advice(H)
-            self.overlay.show_advice(f"Совет: {a.headline}", a, "#ffd54f")
+            if self._hint is None:
+                self.hint()                      # посчитается в фоне и вернётся сюда
+                return
+            self.overlay.show_advice(f"Совет: {self._hint.headline}", self._hint, "#ffd54f")
         elif g.last is not None:
             d = g.last
             title = (f"✔ {d.chosen} — верно" if d.matched else f"✘ Вы — {d.chosen}, тренер — {d.advice.headline}")
@@ -502,11 +553,11 @@ class GameTab(QWidget):
             self.overlay.show_text("Ваш ход" if not g.finished else g.result)
 
     def new_hand(self) -> None:
-        self.game.new_hand()
-        self.new_hand_ui()
+        self._run(self.game.new_hand, lambda _r: self.new_hand_ui(), "Соперники думают…")
 
     def new_hand_ui(self) -> None:
         self.counted = False
+        self._hint = None
         self.verdict.setText("Сделайте ход — тренер прокомментирует решение.")
         self.verdict.setStyleSheet("font-size:17px; font-weight:bold;")
         self.bar.set_values(None, 0)
@@ -514,26 +565,40 @@ class GameTab(QWidget):
         self.refresh()
 
     def hint(self) -> None:
-        a = self.game.advice(H)
-        self.verdict.setText(f"Подсказка: {a.headline}")
-        self.verdict.setStyleSheet("font-size:17px; font-weight:bold; color:#ffd54f;")
-        self.bar.set_values(a.equity, a.required)
-        self.coach.setPlainText(explain(a))
+        if self.game.finished:
+            return
+
+        def done(a) -> None:
+            self._hint = a
+            self.verdict.setText(f"Подсказка: {a.headline}")
+            self.verdict.setStyleSheet("font-size:17px; font-weight:bold; color:#ffd54f;")
+            self.bar.set_values(a.equity, a.required)
+            self.coach.setPlainText(explain(a))
+            self.update_overlay()
+
+        if self._hint is not None:
+            done(self._hint)
+        else:
+            self._run(lambda: self.game.advice(H), done, "Тренер считает…")
 
     def act(self, opt) -> None:
         g = self.game
-        g.hero_act(opt)
-        d = g.last
-        if d.matched:
-            self.verdict.setText(f"✔ {STREET_RU[d.street]}: {d.chosen} — совпало с тренером")
-            color = "#66bb6a"
-        else:
-            self.verdict.setText(f"✘ {STREET_RU[d.street]}: вы — {d.chosen}, тренер — {d.advice.headline}")
-            color = "#ef5350"
-        self.verdict.setStyleSheet(f"font-size:17px; font-weight:bold; color:{color};")
-        self.bar.set_values(d.advice.equity, d.advice.required)
-        self.coach.setPlainText(explain(d.advice))
-        self.refresh()
+
+        def done(_r) -> None:
+            self._hint = None
+            d = g.last
+            if d.matched:
+                self.verdict.setText(f"✔ {STREET_RU[d.street]}: {d.chosen} — совпало с тренером")
+                color = "#66bb6a"
+            else:
+                self.verdict.setText(f"✘ {STREET_RU[d.street]}: вы — {d.chosen}, тренер — {d.advice.headline}")
+                color = "#ef5350"
+            self.verdict.setStyleSheet(f"font-size:17px; font-weight:bold; color:{color};")
+            self.bar.set_values(d.advice.equity, d.advice.required)
+            self.coach.setPlainText(explain(d.advice))
+            self.refresh()
+
+        self._run(lambda: g.hero_act(opt), done, "Тренер и соперники думают…")
 
     def _style_name(self, p) -> str:
         hidden = self.style.currentData() == "random" and not self.revealed
@@ -551,7 +616,7 @@ class GameTab(QWidget):
             b.setMinimumHeight(38)
             b.clicked.connect(lambda _=False, o=opt: self.act(o))
             self.actions.addWidget(b)
-        self.btn_hint.setEnabled(not g.finished)
+        self.btn_hint.setEnabled(not g.finished and not self.busy)
         self.btn_reveal.setVisible(self.style.currentData() == "random" and not self.revealed)
         back = '<span style="background:#3a4c5f; color:#3a4c5f;">&nbsp;??&nbsp;</span>'
         rows = []

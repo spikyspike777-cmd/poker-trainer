@@ -85,7 +85,7 @@ def analyze(state: GameState, use_table: bool = True) -> Analysis:
             pass                             # ни солвер, ни профиль одного оппонента тут не применимы
         elif adj is not None and adj.exploit:
             _exploit(state, a, adj)          # солвер считает оппонента равновесным — тут он не подходит
-        elif SOLVER is not None and state.hero_invested == 0:
+        elif SOLVER is not None and (state.hero_invested == 0 or getattr(SOLVER, "supports_path", False)):
             _solve(state, a, hero, board)
     else:
         _preflop(state, a, use_table)
@@ -390,22 +390,35 @@ def _oop_can_lead(s: GameState) -> bool:
 
 def _solve(s: GameState, a: Analysis, hero, board) -> None:
     """Если солвер умеет этот спот — заменить эвристический совет равновесной стратегией."""
-    pot0 = s.pot - s.to_call                         # банк до ставки оппонента
+    path = None
+    cur = [(k, amt) for (st, _w, k), amt in zip(s.history, s.history_amounts) if st == s.street] \
+        if len(s.history_amounts) == len(s.history) else None
+    if s.hero_invested > 0:
+        if not cur:
+            return                                   # герой уже ставил, а линия улицы неизвестна — остаётся эвристика
+        path = [(1, 0.0) if k == "check" else (2, 0.0) if k == "call" else (3, amt) for k, amt in cur]
+    pot0 = s.pot - s.to_call - 2 * s.hero_invested   # банк на начало улицы
+    stack0 = s.stack + s.hero_invested               # стек героя на начало улицы
     solved = ranges.solved_ranges(s, SOLVER) if P["solved_ranges"] else None
     if solved:
         h_range, h_w, v_range, v_w = solved
     else:
         h_range, h_w, v_range, v_w = ranges.hero_range(s), None, ranges.villain_start(s), None
-    spot = Spot(hero=tuple(hero), board=board, hero_range=h_range, villain_range=v_range, pot=pot0, stack=s.stack,
-                hero_in_position=s.in_position, facing_bet=s.to_call, oop_can_lead=_oop_can_lead(s),
-                hero_weights=h_w, villain_weights=v_w)
+    lead = _oop_can_lead(s) or bool(path and path[0][0] == 3)
+    spot = Spot(hero=tuple(hero), board=board, hero_range=h_range, villain_range=v_range, pot=pot0, stack=stack0,
+                hero_in_position=s.in_position, facing_bet=s.to_call if path is None else 0.0, oop_can_lead=lead,
+                hero_weights=h_w, villain_weights=v_w, path=path)
     if not SOLVER.supports(spot) or not spot.villain_range:
         return
-    res = SOLVER.solve(spot)
+    try:
+        res = SOLVER.solve(spot)
+    except ValueError:
+        return                                       # сыгранной линии нет в дереве солвера — остаётся эвристика
     acts = [x for x in res.actions if x.freq >= 0.05] or res.actions
     total = sum(x.freq for x in acts)
     acts.sort(key=lambda x: -x.freq)
-    a.mix = [(x.kind, x.amount if x.kind in ("bet", "raise", "call") else None, x.freq / total, round(x.ev, 2) + 0.0) for x in acts]
+    a.mix = [(x.kind, s.to_call if x.kind == "call" else x.amount if x.kind in ("bet", "raise") else None,
+              x.freq / total, round(x.ev, 2) + 0.0) for x in acts]
     kind, amount, freq, _ev = a.mix[0]
     a.action, a.amount = kind, amount
     a.sizing = f"{amount / pot0:.0%} банка" if kind == "bet" else ("3× ставки" if kind == "raise" else "")
