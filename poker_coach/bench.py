@@ -149,17 +149,52 @@ def _post_job(args):
             setattr(coach.SOLVER, k, tuple(v) if isinstance(v, list) else v)
         if o.get("no_flop") and hasattr(coach.SOLVER, "solve_flop"):
             coach.SOLVER.solve_flop = False
-    top = None
-    try:
-        a = coach.analyze(postflop_state(row))
-        kind, label = _label(a, row)
-        top = a.mix[0][2] if a.mix else None
-    except Exception as e:                             # спот не разобрался — считаем ошибкой
-        kind, label = "error", f"error: {type(e).__name__}: {e}"
+    top, extra = None, None
     gold = row["correct_decision"].lower()
     g = gold.split()
+    try:
+        st = postflop_state(row)
+        a = coach.analyze(st)
+        kind, label = _label(a, row)
+        top = a.mix[0][2] if a.mix else None
+        if a.all_actions:
+            extra = _features(a, st, row, g)
+    except Exception as e:                             # спот не разобрался — считаем ошибкой
+        kind, label = "error", f"error: {type(e).__name__}: {e}"
     gold_label = f"{g[0]} {float(g[1]):g}" if len(g) > 1 else gold
-    return row["evaluation_at"], g[0], kind, label == gold_label, label, top
+    return row["evaluation_at"], g[0], kind, label == gold_label, label, top, extra
+
+
+FAMILIES = ["fold", "check", "call", "bet", "raise"]
+
+
+def _family(kind: str, facing: bool) -> str:
+    if kind == "allin":
+        return "raise" if facing else "bet"
+    return kind
+
+
+def _features(a, st, row: dict, g: list[str]) -> dict:
+    """Выход солвера в виде признаков + насколько действие эталона хуже лучшего по нашему солверу."""
+    facing = st.to_call > 0
+    freq = {f: 0.0 for f in FAMILIES}
+    best = {}
+    for kind, amount, f, ev in a.all_actions:
+        fam = _family(kind, facing)
+        freq[fam] += f
+        best[fam] = max(best.get(fam, -1e9), ev)
+    top_ev = max(best.values())
+    moves = {m.split()[0].lower() for m in ast.literal_eval(row["available_moves"])}
+    gold_ev = best.get(g[0])
+    return dict(
+        street=["Flop", "Turn", "River"].index(row["evaluation_at"]), ip=int(st.in_position),
+        call_frac=st.to_call / st.pot, invested=int(st.hero_invested > 0), spr=min(st.stack / st.pot, 20.0),
+        equity=a.equity or 0.0, required=a.required,
+        **{f"p_{f}": freq[f] for f in FAMILIES},
+        **{f"gap_{f}": (top_ev - best[f]) / st.pot if f in best else 1.0 for f in FAMILIES},
+        **{f"can_{f}": int(f in moves) for f in FAMILIES},
+        gold=g[0], gold_gap_bb=None if gold_ev is None else top_ev - gold_ev,
+        gold_gap_pot=None if gold_ev is None else (top_ev - gold_ev) / st.pot, gold_freq=freq.get(g[0], 0.0))
 
 
 def USE_HISTORY_set(o) -> None:
@@ -284,6 +319,17 @@ def report(pre, post) -> str:
                          f"где смешивает: n={len(mixed)}, AA {_pct(sum(r[1] == r[2] for r in mixed), len(mixed)).strip()}")
             rest = [r for r in post if r[5] is None]
             lines.append(f"  эвристикой: n={len(rest)}, AA {_pct(sum(r[1] == r[2] for r in rest), len(rest)).strip()}")
+            ex = [r for r in solved if r[6]]
+            soft = lambda lim: sum(1 for r in ex if r[1] == r[2] or (
+                r[6]["gold_gap_pot"] is not None and r[6]["gold_gap_pot"] <= lim))
+            lines.append(f"  мягкая точность (совпало, либо действие эталона по нашему солверу теряет не больше "
+                         f"1% банка): {_pct(soft(0.01), len(ex)).strip()}; не больше 3% банка: {_pct(soft(0.03), len(ex)).strip()}")
+            wrong = [r for r in ex if r[1] != r[2] and r[6]["gold_gap_pot"] is not None]
+            if wrong:
+                gaps = sorted(r[6]["gold_gap_pot"] for r in wrong)
+                lines.append(f"  в несовпавших спотах действие эталона теряет по нашему солверу: медиана "
+                             f"{100 * gaps[len(gaps) // 2]:.1f}% банка; средняя частота, которую мы ему даём: "
+                             f"{100 * sum(r[6]['gold_freq'] for r in wrong) / len(wrong):.0f}%")
         errs = sum(1 for r in post if r[2] == "error")
         if errs:
             ex = next(r[4] for r in post if r[2] == "error")
@@ -305,6 +351,7 @@ def main() -> None:
     p.add_argument("--no-history", action="store_true", help="не учитывать историю ставок")
     p.add_argument("--no-table", action="store_true", help="префлоп только по ручным чартам")
     p.add_argument("--solver-args", default="{}", help='настройки солвера в JSON, например {"turn_sizes": [0.66]}')
+    p.add_argument("--dump", help="записать признаки спотов (выход солвера) в файл JSONL")
     p.add_argument("--set", action="append", default=[], help="параметр из params.py: имя=значение")
     p.add_argument("--skip-postflop", action="store_true")
     p.add_argument("--skip-preflop", action="store_true")
@@ -318,6 +365,11 @@ def main() -> None:
     pre = [] if a.skip_preflop else run_preflop()
     post = [] if a.skip_postflop else run_postflop(a.n, opts, seed=a.seed)
     print(report(pre, post))
+    if a.dump:
+        with open(a.dump, "w") as f:
+            for r in post:
+                if r[6]:
+                    f.write(json.dumps(dict(r[6], pred=r[2])) + "\n")
 
 
 if __name__ == "__main__":

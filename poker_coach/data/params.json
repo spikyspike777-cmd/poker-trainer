@@ -14,5 +14,6 @@
  "call_keep": 0.45,
  "check_back_drop": 0.1,
  "table_ranges": 0,
- "solved_ranges": 1
+ "solved_ranges": 1,
+ "data_ranges": 1
 }

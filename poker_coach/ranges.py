@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import eval7
 
-from . import calc, charts, preflop_gto
+from . import calc, charts, preflop_gto, range_data
 from .params import P
 from .state import GameState, PreflopLine as L, to_eval7
 
@@ -47,6 +47,35 @@ def start_range(line: L, me: str, opp: str | None):
     if keys:
         return list(charts.keys_to_combos(keys)), label
     return charts.combos(chart), label
+
+
+def start_weighted(line: L, me: str, opp: str | None):
+    """Как start_range, но с весами рук: -> (комбинации, веса, описание) или None.
+
+    Если включены диапазоны из данных и для линии они есть, веса берутся оттуда; иначе все веса равны 1.
+    """
+    got = start_range(line, me, opp)
+    if got is None:
+        return None
+    if P["data_ranges"]:
+        data = range_data.lookup(line.value, me, opp)
+        if data:
+            return list(data[0]), list(data[1]), got[1]
+    return list(got[0]), [1.0] * len(got[0]), got[1]
+
+
+def villain_start_weighted(state: GameState):
+    """Стартовый диапазон оппонента с весами (с поправкой на профиль, если она есть)."""
+    h, v, line = state.hero_pos, state.villain_pos, state.preflop_line
+    if line in (L.UNOPENED, L.OTHER, L.VS_4BET) or v is None:
+        got = _start(state)
+        return (list(got[0]), [1.0] * len(got[0]), got[1]) if got else None
+    got = start_weighted(_MIRROR[line], v, h)
+    scale = _scales(state)[0]
+    if got and abs(scale - 1) >= 0.05:                 # профиль меняет ширину — веса из данных уже не подходят
+        scaled = charts.scale_range(got[0], scale)
+        return scaled, [1.0] * len(scaled), got[2]
+    return got
 
 
 _MIRROR = {
@@ -188,8 +217,8 @@ def solved_ranges(state: GameState, solver):
     past = [s for s in ("flop", "turn") if s != state.street and STREETS_ORDER.index(s) < STREETS_ORDER.index(state.street)]
     if not past or len(amts) != len(hist) or state.extra_villains or not hasattr(solver, "reach_after"):
         return None
-    start_h = start_range(state.preflop_line, state.hero_pos, state.villain_pos)
-    start_v = _start(state)
+    start_h = start_weighted(state.preflop_line, state.hero_pos, state.villain_pos)
+    start_v = villain_start_weighted(state)
     if start_h is None or start_v is None:
         return None
     # сколько каждый вложил на каждой улице
@@ -209,8 +238,8 @@ def solved_ranges(state: GameState, solver):
         return None
     board = to_eval7(state.board)
     hero_ip = state.in_position
-    combos = {"hero": list(start_h[0]), "villain": charts.scale_range(start_v[0], _scales(state)[0])}
-    weights = {a: [1.0] * len(combos[a]) for a in combos}
+    combos = {"hero": list(start_h[0]), "villain": list(start_v[0])}
+    weights = {"hero": list(start_h[1]), "villain": list(start_v[1])}
     oop, ip = ("villain", "hero") if hero_ip else ("hero", "villain")
     for street in past:
         b = board[:_STREET_CARDS[street]]
@@ -240,4 +269,23 @@ def solved_ranges(state: GameState, solver):
         if len(keep) < 2:
             return None
         out += [[combos[a][i] for i in keep], [weights[a][i] for i in keep]]
+    return tuple(out)
+
+
+def flop_ranges(state: GameState):
+    """Взвешенные стартовые диапазоны для решения на флопе: (руки героя, веса, руки оппонента, веса) или None."""
+    if state.extra_villains or not P["data_ranges"]:
+        return None
+    sh = start_weighted(state.preflop_line, state.hero_pos, state.villain_pos)
+    sv = villain_start_weighted(state)
+    if sh is None or sv is None:
+        return None
+    board = set(to_eval7(state.board))
+    dead = {0: board, 1: board | set(to_eval7(state.hero_cards))}
+    out = []
+    for i, (combos, weights, _label) in enumerate((sh, sv)):
+        keep = [k for k, c in enumerate(combos) if c[0] not in dead[i] and c[1] not in dead[i]]
+        if len(keep) < 2:
+            return None
+        out += [[combos[k] for k in keep], [weights[k] for k in keep]]
     return tuple(out)

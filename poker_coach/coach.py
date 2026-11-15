@@ -33,6 +33,7 @@ class Analysis:
     villain: ranges.VillainRange | None = None
     reasons: list[str] = field(default_factory=list)
     source: str = ""                     # откуда совет: чарт, эвристика или солвер
+    all_actions: list[tuple[str, float, float, float]] = field(default_factory=list)   # все действия солвера
     mix: list[tuple[str, float | None, float, float]] = field(default_factory=list)
     # ^ смешанная стратегия солвера: (действие, размер, частота, EV в bb)
 
@@ -412,6 +413,8 @@ def _solve(s: GameState, a: Analysis, hero, board) -> None:
     pot0 = s.pot - s.to_call - 2 * s.hero_invested   # банк на начало улицы
     stack0 = s.stack + s.hero_invested               # стек героя на начало улицы
     solved = ranges.solved_ranges(s, SOLVER) if P["solved_ranges"] else None
+    if solved is None and s.street == "flop" and s.hero_invested == 0 and not s.history:
+        solved = ranges.flop_ranges(s)               # на флопе цепочки ещё нет — берём взвешенный старт
     if solved:
         h_range, h_w, v_range, v_w = solved
     else:
@@ -426,6 +429,7 @@ def _solve(s: GameState, a: Analysis, hero, board) -> None:
         res = SOLVER.solve(spot)
     except ValueError:
         return                                       # сыгранной линии нет в дереве солвера — остаётся эвристика
+    a.all_actions = [(x.kind, x.amount, x.freq, x.ev) for x in res.actions]
     acts = [x for x in res.actions if x.freq >= 0.05] or res.actions
     total = sum(x.freq for x in acts)
     acts.sort(key=lambda x: -x.freq)
