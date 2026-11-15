@@ -9,6 +9,7 @@ from poker_coach.engine import Game, H
 @pytest.fixture(autouse=True)
 def fast_solver(monkeypatch):
     monkeypatch.setattr(coach.SOLVER, "iterations", 20)
+    monkeypatch.setattr(coach.SOLVER, "turn_iterations", 15, raising=False)
 
 
 @pytest.mark.parametrize("n", [2, 3, 4, 6])

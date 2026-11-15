@@ -8,6 +8,7 @@ SAMPLE = Path(__file__).resolve().parent.parent / "samples" / "pokerstars_sample
 
 def test_sample_session(monkeypatch):
     monkeypatch.setattr(coach.SOLVER, "iterations", 30)
+    monkeypatch.setattr(coach.SOLVER, "turn_iterations", 15, raising=False)
     hands = review_session(SAMPLE.read_text(encoding="utf-8"))
     assert [h.hero_pos for h in hands] == ["BTN", "CO", "HJ"]
     assert [h.net_bb for h in hands] == [-13.5, 1.5, -13.0]

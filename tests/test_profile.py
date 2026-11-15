@@ -45,7 +45,9 @@ def test_weak_showdown():
     assert not is_weak_showdown(to_eval7(["9c", "8d"]), board)
 
 
-def test_coach_stops_bluffing_station_and_bluffs_nit():
+def test_coach_stops_bluffing_station_and_bluffs_nit(monkeypatch):
+    from poker_coach.params import P
+    monkeypatch.setitem(P, "semibluff_eq", 0.3)          # включаем полублефы, чтобы было что отменять
     kw = dict(hero_cards="9s 8s", board="7d 6c Kh", hero_pos="BTN", villain_pos="BB",
               preflop_line="hero_open_villain_call", pot=5.5, stack=97.5)
     assert analyze(GameState(**kw)).action == "bet"                                      # полублеф по умолчанию
@@ -60,6 +62,7 @@ def test_coach_stops_bluffing_station_and_bluffs_nit():
 
 def test_bots_differ(monkeypatch):
     monkeypatch.setattr(coach.SOLVER, "iterations", 20)
+    monkeypatch.setattr(coach.SOLVER, "turn_iterations", 15, raising=False)
     seen = {}
     for style in ("nit", "station"):
         g = Game(n_players=2, styles=style, rng=random.Random(2), use_profile=False)

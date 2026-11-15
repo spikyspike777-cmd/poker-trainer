@@ -8,14 +8,14 @@ from dataclasses import dataclass, field
 
 from . import calc, charts, preflop_gto, ranges
 from .params import P
-from .solver import RiverCFR, Solver, Spot
+from .solver import Solver, Spot, default_solver
 from .state import GameState, PreflopLine as L, to_eval7
 
 # Использовать ли префлоп-таблицу из решений солвера (иначе — только ручные чарты).
 USE_GTO_TABLE = True
 
 # Солвер для постфлопа. None — только эвристика. Заменяется любой реализацией solver.base.Solver.
-SOLVER: Solver | None = RiverCFR(iterations=300)
+SOLVER: Solver | None = default_solver()
 
 ACTION_RU = {"fold": "Фолд", "check": "Чек", "call": "Колл", "bet": "Бет", "raise": "Рейз", "allin": "Олл-ин"}
 

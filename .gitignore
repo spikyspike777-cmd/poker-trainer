@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 /data/
 *.whl
+solver_rs/target/

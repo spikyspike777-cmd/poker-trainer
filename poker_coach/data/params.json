@@ -1,0 +1,17 @@
+{
+ "raise_eq": 0.88,
+ "raise_eq_river": 0.8,
+ "call_margin_river": -0.03,
+ "call_margin": 0.0,
+ "value_big": 0.8,
+ "value": 0.72,
+ "thin": 0.99,
+ "semibluff_eq": 0.99,
+ "bet_keep": 0.5,
+ "bet_bluffs": 0.05,
+ "raise_keep": 0.3,
+ "raise_bluffs": 0.0,
+ "call_keep": 0.45,
+ "check_back_drop": 0.1,
+ "table_ranges": 0
+}
