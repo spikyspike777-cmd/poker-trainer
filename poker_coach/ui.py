@@ -12,10 +12,10 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QMainWindow, QPushButton, QRadioButton,
-    QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QTabWidget, QTextBrowser, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from . import charts, ranges
+from . import charts, ranges, theory
 from .coach import Analysis, analyze, explain
 from .bots import STYLES
 from .engine import STREET_RU, Game, H
@@ -779,6 +779,26 @@ class SessionTab(QWidget):
         self.text.setPlainText(explain(d.advice))
 
 
+class LearnTab(QWidget):
+    """Учебник: список глав слева, текст справа."""
+
+    def __init__(self):
+        super().__init__()
+        root = QHBoxLayout(self)
+        self.chapters = QListWidget()
+        self.chapters.setFixedWidth(270)
+        self.chapters.setStyleSheet("QListWidget { background:#101820; border:1px solid #2f3d4c; } "
+                                    "QListWidget::item { padding:7px; } QListWidget::item:selected { background:#2f4257; }")
+        for title, _html in theory.CHAPTERS:
+            self.chapters.addItem(title)
+        self.text = QTextBrowser()
+        self.text.setStyleSheet("QTextBrowser { background:#101820; border:1px solid #2f3d4c; padding:10px; font-size:14px; }")
+        root.addWidget(self.chapters)
+        root.addWidget(self.text, 1)
+        self.chapters.currentRowChanged.connect(lambda i: self.text.setHtml(theory.html(i)) if i >= 0 else None)
+        self.chapters.setCurrentRow(0)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -790,6 +810,8 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.trainer, "Разбор ситуации")
         self.session = SessionTab()
         tabs.addTab(self.session, "Разбор сессии")
+        self.learn = LearnTab()
+        tabs.addTab(self.learn, "Обучение")
         self.setCentralWidget(tabs)
         self.tabs = tabs
         self.resize(1180, 760)
