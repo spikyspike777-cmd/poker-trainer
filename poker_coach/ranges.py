@@ -5,7 +5,8 @@ from dataclasses import dataclass
 
 import eval7
 
-from . import calc, charts
+from . import calc, charts, preflop_gto
+from .params import P
 from .state import GameState, PreflopLine as L, to_eval7
 
 _SB_CALL_FALLBACK = "JJ-22, AQs-A8s, KTs+, QTs+, JTs, T9s, 98s, AQo-AJo, KQo"
@@ -20,41 +21,65 @@ class VillainRange:
     weights: list[float] | None = None   # вес каждой комбинации (от солвера); None — все равны
 
 
-def _start(state: GameState) -> tuple[str, str] | None:
+
+
+def start_range(line: L, me: str, opp: str | None):
+    """Префлоп-диапазон игрока `me`, если с ЕГО точки зрения раздача шла по линии `line` против `opp`.
+
+    -> (комбинации, описание) или None, если диапазон для такой линии не определён.
+    """
+    if opp is None:
+        return None
+    # (линия для таблицы, действие, строка ручного чарта, описание)
+    if line in (L.HERO_OPEN_VILLAIN_CALL, L.VS_3BET):
+        spec = ("", "raise", charts.RFI.get(me, charts.RFI["BTN"]), f"открытие рейзом с {me}")
+    elif line == L.VILLAIN_OPEN_HERO_CALL:
+        spec = (f"{opp}/r", "call", charts.vs_open_ranges(me, opp)[1] or _SB_CALL_FALLBACK,
+                f"колл с {me} против опена с {opp}")
+    elif line in (L.HERO_3BET_VILLAIN_CALL, L.VS_4BET):
+        spec = (f"{opp}/r", "raise", charts.vs_open_ranges(me, opp)[0], f"3-бет с {me} против опена с {opp}")
+    elif line == L.VILLAIN_3BET_HERO_CALL:
+        spec = (f"{me}/r/{opp}/r", "call", charts.vs_3bet_ranges(me)[1], f"колл 3-бета с {me}")
+    else:
+        return None
+    abs_line, kind, chart, label = spec
+    keys = preflop_gto.range_keys(abs_line, me, kind) if P["table_ranges"] else None
+    if keys:
+        return list(charts.keys_to_combos(keys)), label
+    return charts.combos(chart), label
+
+
+_MIRROR = {
+    L.VS_OPEN: L.HERO_OPEN_VILLAIN_CALL,               # оппонент открылся — с его стороны «я открылся»
+    L.VILLAIN_OPEN_HERO_CALL: L.HERO_OPEN_VILLAIN_CALL,
+    L.VS_3BET: L.HERO_3BET_VILLAIN_CALL,               # оппонент сделал 3-бет
+    L.VILLAIN_3BET_HERO_CALL: L.HERO_3BET_VILLAIN_CALL,
+    L.HERO_OPEN_VILLAIN_CALL: L.VILLAIN_OPEN_HERO_CALL,
+    L.HERO_3BET_VILLAIN_CALL: L.VILLAIN_3BET_HERO_CALL,
+}
+
+
+def _start(state: GameState):
+    """Стартовый диапазон оппонента: (комбинации, описание) или None."""
     h, v, line = state.hero_pos, state.villain_pos, state.preflop_line
     if line in (L.UNOPENED, L.OTHER) or v is None:
         return None
-    if line in (L.VS_OPEN, L.VILLAIN_OPEN_HERO_CALL):
-        return charts.RFI.get(v, charts.RFI["BTN"]), f"открытие рейзом с {v}"
-    if line in (L.VS_3BET, L.VILLAIN_3BET_HERO_CALL):
-        return charts.vs_open_ranges(v, h)[0], f"3-бет с {v} против опена с {h}"
-    if line == L.VS_4BET:
-        return charts.vs_3bet_ranges(v)[0], f"4-бет с {v}"
-    if line == L.HERO_OPEN_VILLAIN_CALL:
-        return charts.vs_open_ranges(v, h)[1] or _SB_CALL_FALLBACK, f"колл с {v} против опена с {h}"
-    return charts.vs_3bet_ranges(v)[1], f"колл 3-бета с {v}"
+    if line == L.VS_4BET:                              # оппонент открылся и сделал 4-бет
+        keys = preflop_gto.range_keys(f"{v}/r/{h}/r", v, "raise") if P["table_ranges"] else None
+        combos = list(charts.keys_to_combos(keys)) if keys else charts.combos(charts.vs_3bet_ranges(v)[0])
+        return combos, f"4-бет с {v}"
+    return start_range(_MIRROR[line], v, h)
 
 
-_HERO_LINE_RANGE = {
-    L.HERO_OPEN_VILLAIN_CALL: lambda h, v: charts.RFI.get(h, charts.RFI["BTN"]),
-    L.VILLAIN_OPEN_HERO_CALL: lambda h, v: charts.vs_open_ranges(h, v)[1] or _SB_CALL_FALLBACK,
-    L.HERO_3BET_VILLAIN_CALL: lambda h, v: charts.vs_open_ranges(h, v)[0],
-    L.VILLAIN_3BET_HERO_CALL: lambda h, v: charts.vs_3bet_ranges(h)[1],
-}
 _STREET_CARDS = {"flop": 3, "turn": 4, "river": 5}
-# Какую часть диапазона (сверху по силе) игрок оставляет при действии и сколько добавляет блефов снизу.
-NARROW = {"bet": (0.50, 0.12), "raise": (0.30, 0.08), "call": (0.45, 0.0)}
-CHECK_BACK_DROP = 0.25      # чек в позиции: убираем верх диапазона (сильные руки обычно ставят)
-
-
 def narrow(combos, board, kind: str, in_position: bool, bluff_scale: float = 1.0):
     """Сузить диапазон после одного действия игрока на борде `board` (эвристика)."""
     if len(combos) < 4:
         return combos
     ranked = sorted(combos, key=lambda c: eval7.evaluate(list(c) + board), reverse=True)
     if kind == "check":
-        return ranked[int(len(ranked) * CHECK_BACK_DROP):] if in_position else ranked
-    keep, bluffs = NARROW[kind]
+        return ranked[int(len(ranked) * P["check_back_drop"]):] if in_position else ranked
+    keep, bluffs = P[f"{kind}_keep"], P.get(f"{kind}_bluffs", 0.0)
     n = max(1, int(len(ranked) * keep))
     kept, rest = ranked[:n], ranked[n:]
     k = int(len(ranked) * min(0.35, bluffs * bluff_scale))
@@ -83,28 +108,44 @@ def _through_history(combos, state: GameState, who: str, in_position: bool, incl
 
 def hero_range(state: GameState) -> list[calc.Combo]:
     """Диапазон героя на начало текущей улицы (нужен солверу): чарты + сужение по его действиям."""
-    rng = _HERO_LINE_RANGE[state.preflop_line](state.hero_pos, state.villain_pos)
-    combos = calc.live_combos(charts.combos(rng), to_eval7(state.board))
+    combos, _ = start_range(state.preflop_line, state.hero_pos, state.villain_pos)
+    combos = calc.live_combos(combos, to_eval7(state.board))
     return _through_history(combos, state, "hero", state.in_position, include_current=False)
 
 
 def villain_start(state: GameState) -> list[calc.Combo]:
     """Диапазон оппонента на начало текущей улицы: префлоп-линия + действия на прошлых улицах."""
-    rng_str, _ = _start(state)
-    combos = calc.live_combos(charts.scale_range(rng_str, _scales(state)[0]),
+    base, _ = _start(state)
+    combos = calc.live_combos(charts.scale_range(base, _scales(state)[0]),
                               to_eval7(state.hero_cards) + to_eval7(state.board))
     return _through_history(combos, state, "villain", not state.in_position, include_current=False)
+
+
+def extra_ranges(state: GameState) -> list[list[calc.Combo]]:
+    """Диапазоны остальных оппонентов в мультивей-банке, суженные по их действиям."""
+    dead = to_eval7(state.hero_cards) + to_eval7(state.board)
+    board = to_eval7(state.board)
+    out = []
+    for i, (pos, line) in enumerate(state.extra_villains, start=2):
+        got = start_range(_MIRROR.get(line, L.VILLAIN_OPEN_HERO_CALL), pos, state.hero_pos)
+        combos = calc.live_combos(got[0] if got else charts.combos(charts.RFI["BTN"]), dead)
+        for street, actor, kind in state.history:
+            if actor == f"v{i}":
+                combos = narrow(combos, board[:_STREET_CARDS[street]], kind, False)
+        out.append(combos)
+    return out
 
 
 def villain_range(state: GameState) -> VillainRange | None:
     start = _start(state)
     if start is None:
         return None
-    rng_str, label = start
+    base, label = start
     hero, board = to_eval7(state.hero_cards), to_eval7(state.board)
     scale, bluff_scale = _scales(state)
-    combos = calc.live_combos(charts.scale_range(rng_str, scale), hero + board)
-    vr = VillainRange(combos, label, charts.range_percent(rng_str) * (scale if abs(scale - 1) >= 0.05 else 1))
+    scaled = charts.scale_range(base, scale)
+    combos = calc.live_combos(scaled, hero + board)
+    vr = VillainRange(combos, label, 100 * len(scaled) / 1326)
     if abs(scale - 1) >= 0.05:
         vr.label += f", с поправкой на профиль (×{scale:g})"
     if not board:

@@ -79,7 +79,7 @@ class PlayerStats:
         """Поправки со сглаживанием: при малой выборке значения близки к норме."""
         a = Adjust(hands=self.hands)
         if self.pre_spots >= 10:
-            a.range_scale = round(min(1.7, max(0.55, (self.pre_continued + 5) / (self.pre_expected + 5))), 2)
+            a.range_scale = round(min(1.7, max(0.55, (self.pre_continued + 8) / (self.pre_expected + 8))), 2)
         n = self.post_actions
         if n >= 8:
             aggr = (self.bets + BASE_AGGR * 15) / (n + 15)
@@ -88,7 +88,7 @@ class PlayerStats:
                 shown = (self.shown_river_bluffs + BASE_BLUFF * 5) / (self.shown_river_bets + 5) / BASE_BLUFF
                 scale = 0.7 * scale + 0.3 * shown
             a.bluff_scale = round(min(2.5, max(0.3, scale)), 2)
-        if self.faced_bet >= 8:
+        if self.faced_bet >= 12:
             a.fold_to_bet = round((self.folded_to_bet + BASE_FOLD_TO_BET * 4) / (self.faced_bet + 4), 2)
 
         tags, notes = [], []
@@ -110,7 +110,7 @@ class PlayerStats:
             if a.fold_to_bet <= 0.14:
                 tags.append("редко сбрасывает")
                 notes.append(f"на ставку сбрасывает примерно в {a.fold_to_bet:.0%} случаев — блефовать против него невыгодно")
-            elif a.fold_to_bet >= 0.42:
+            elif a.fold_to_bet >= 0.5:
                 tags.append("часто сбрасывает")
                 notes.append(f"на ставку сбрасывает примерно в {a.fold_to_bet:.0%} случаев — блефы против него окупаются")
         a.label, a.notes = ", ".join(tags), notes

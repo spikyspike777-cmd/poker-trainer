@@ -83,6 +83,34 @@ def lookup(line: str, hero_pos: str, cards: list[str]) -> Hit | None:
     return Hit(label, False, near, same)
 
 
+_RANKS = "AKQJT98765432"
+ALL_KEYS = [a + b if i == j else (a + b + "s" if i < j else b + a + "o")
+            for i, a in enumerate(_RANKS) for j, b in enumerate(_RANKS)]
+
+
+@lru_cache(maxsize=None)
+def range_keys(abs_line: str, pos: str, kind: str) -> tuple[str, ...] | None:
+    """Руки, с которыми солвер в этой линии делает `kind` (raise или call).
+
+    Линия без размеров ставок: '' — открытие, 'CO/r' — против опена с CO, 'CO/r/BTN/r' — против 3-бета.
+    Рук, которых в таблице нет, относим к действию ближайших по силе рук. None — линия покрыта слишком слабо.
+    """
+    hands = _load()[1].get(f"{abs_line}|{pos}")
+    if not hands or len(hands) < 40:
+        return None
+    norm = lambda lab: "raise" if lab.endswith("bb") or lab == "allin" else lab
+    out = []
+    for key in ALL_KEYS:
+        if key in hands:
+            lab = norm(hands[key])
+        else:
+            near = sorted(hands, key=lambda h: _dist(key, h))[:3]
+            lab = Counter(norm(hands[h]) for h in near).most_common(1)[0][0]
+        if lab == kind:
+            out.append(key)
+    return tuple(out)
+
+
 def build(csv_path: Path) -> int:
     import csv
     votes: dict[str, dict[str, Counter]] = defaultdict(lambda: defaultdict(Counter))

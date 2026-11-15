@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 from . import charts, ranges
 from .coach import Analysis, analyze, explain
 from .bots import STYLES
-from .engine import STREET_RU, Game, H, V
+from .engine import STREET_RU, Game, H
 from .hh import review_session
 from .scenarios import random_state
 from .state import LINE_LABELS, POSITIONS, PREFLOP_DECISIONS, RANKS, GameState, PreflopLine
@@ -364,45 +364,52 @@ class TrainerTab(QWidget):
 
 
 class GameTab(QWidget):
-    """Полная раздача против бота: решение на каждой улице и комментарий тренера."""
+    """Стол на 2–6 игроков: решение на каждой улице и комментарий тренера."""
 
     def __init__(self):
         super().__init__()
-        self.game = Game()
+        self.game = Game(n_players=6, styles="random")
         self.hands = 0
         self.total = 0.0
         self.counted = False
+        self.revealed = False
         root = QHBoxLayout(self)
         left, right = QVBoxLayout(), QVBoxLayout()
         root.addLayout(left, 1)
         root.addLayout(right, 1)
 
-        obox = QGroupBox("Соперник")
+        obox = QGroupBox("Стол и соперники")
         ol = QVBoxLayout(obox)
         orow = QHBoxLayout()
+        self.count = QComboBox()
+        for n in range(2, 7):
+            self.count.addItem(f"{n} игроков" if n > 4 else f"{n} игрока", n)
+        self.count.setCurrentIndex(4)
         self.style = QComboBox()
+        self.style.addItem("Случайные характеры (скрыты)", "random")
         for st in STYLES.values():
-            self.style.addItem(st.name, st.key)
-        self.style.addItem("Случайный (тип скрыт)", "hidden")
-        self.use_profile = QCheckBox("Тренер учитывает профиль")
-        self.use_profile.setChecked(True)
-        self.btn_reveal = QPushButton("Раскрыть тип")
+            self.style.addItem(f"Все: {st.name.lower()}", st.key)
+        self.btn_reveal = QPushButton("Раскрыть характеры")
+        orow.addWidget(self.count)
         orow.addWidget(self.style, 1)
-        orow.addWidget(self.use_profile)
         orow.addWidget(self.btn_reveal)
         ol.addLayout(orow)
-        self.profile = QLabel()
-        self.profile.setWordWrap(True)
-        self.profile.setStyleSheet("color:#8fa3b8; font-size:11px;")
-        ol.addWidget(self.profile)
+        crow = QHBoxLayout()
+        self.use_profile = QCheckBox("Тренер учитывает профили ботов")
+        self.use_profile.setChecked(True)
+        self.adaptive = QCheckBox("Боты подстраиваются под меня")
+        crow.addWidget(self.use_profile)
+        crow.addWidget(self.adaptive)
+        crow.addStretch()
+        ol.addLayout(crow)
         left.addWidget(obox)
 
         table = QGroupBox("Стол")
         tl = QVBoxLayout(table)
         self.table = QLabel()
         self.table.setTextFormat(Qt.RichText)
-        self.table.setAlignment(Qt.AlignCenter)
-        self.table.setMinimumHeight(215)
+        self.table.setMinimumHeight(250)
+        self.table.setAlignment(Qt.AlignTop)
         tl.addWidget(self.table)
         left.addWidget(table)
         self.actions = QHBoxLayout()
@@ -439,32 +446,37 @@ class GameTab(QWidget):
         self.coach = QTextEdit()
         self.coach.setReadOnly(True)
         cl.addWidget(self.coach)
-        right.addWidget(cbox, 1)
+        right.addWidget(cbox, 2)
+        pbox = QGroupBox("Что тренер заметил за соперниками")
+        pl = QVBoxLayout(pbox)
+        self.profile = QLabel()
+        self.profile.setWordWrap(True)
+        self.profile.setTextFormat(Qt.RichText)
+        self.profile.setStyleSheet("font-size:11px;")
+        pl.addWidget(self.profile)
+        right.addWidget(pbox, 0)
 
         self.btn_new.clicked.connect(self.new_hand)
         self.btn_hint.clicked.connect(self.hint)
         self.btn_overlay.clicked.connect(self.toggle_overlay)
-        self.style.currentIndexChanged.connect(self.change_style)
-        self.use_profile.toggled.connect(self.set_use_profile)
+        self.count.currentIndexChanged.connect(self.reseat)
+        self.style.currentIndexChanged.connect(self.reseat)
+        self.use_profile.toggled.connect(lambda on: setattr(self.game, "use_profile", on))
+        self.adaptive.toggled.connect(lambda on: setattr(self.game, "adaptive", on))
         self.btn_reveal.clicked.connect(self.reveal)
-        self.btn_reveal.hide()
         self.overlay.live.toggled.connect(lambda _on: self.update_overlay())
         self.refresh()
 
-    def change_style(self) -> None:
-        key = self.style.currentData()
-        hidden = key == "hidden"
-        self.btn_reveal.setVisible(hidden)
-        self.btn_reveal.setText("Раскрыть тип")
-        self.game.set_style(random.choice(list(STYLES)) if hidden else key)
-        self.hands, self.total, self.counted = 0, 0.0, False
+    def reseat(self) -> None:
+        """Сменить число игроков или характеры: профили и счёт начинаются заново."""
+        self.revealed = False
+        self.game.setup(self.count.currentData(), self.style.currentData())
+        self.hands, self.total = 0, 0.0
         self.new_hand_ui()
 
-    def set_use_profile(self, on: bool) -> None:
-        self.game.use_profile = on
-
     def reveal(self) -> None:
-        self.btn_reveal.setText(f"Это был: {self.game.style.name}")
+        self.revealed = True
+        self.refresh()
 
     def toggle_overlay(self) -> None:
         if self.overlay.isVisible():
@@ -522,6 +534,10 @@ class GameTab(QWidget):
         self.coach.setPlainText(explain(d.advice))
         self.refresh()
 
+    def _style_name(self, p) -> str:
+        hidden = self.style.currentData() == "random" and not self.revealed
+        return "характер скрыт" if hidden else p.style.name.lower()
+
     def refresh(self) -> None:
         g = self.game
         while self.actions.count():
@@ -535,17 +551,28 @@ class GameTab(QWidget):
             b.clicked.connect(lambda _=False, o=opt: self.act(o))
             self.actions.addWidget(b)
         self.btn_hint.setEnabled(not g.finished)
-        back = '<span style="background:#3a4c5f; color:#3a4c5f; font-size:26px;">&nbsp;??&nbsp;</span>'
-        vil = " ".join(card_html(c, 26) for c in g.cards[V]) if g.finished and any(
-            "Вскрытие" in x for x in g.log) else f"{back} {back}"
-        board = " ".join(card_html(c, 30) for c in g.board) or '<span style="color:#5c6b7a;">борд ещё не открыт</span>'
-        bets = ""
-        if g.inv[V] or g.inv[H]:
-            bets = f"<br><span style='color:#8fa3b8;'>ставки на улице: оппонент {g.inv[V]:g}, вы {g.inv[H]:g}</span>"
+        self.btn_reveal.setVisible(self.style.currentData() == "random" and not self.revealed)
+        back = '<span style="background:#3a4c5f; color:#3a4c5f;">&nbsp;??&nbsp;</span>'
+        rows = []
+        for i, p in enumerate(g.players):
+            if i == H:
+                continue
+            cards = " ".join(card_html(c, 15) for c in p.cards) if i in g.shown else f"{back} {back}"
+            state = "сбросил" if p.folded else (f"ставка {p.inv:g}" if p.inv else "в игре")
+            turn = " ◀ ходит" if g.to_act == i else ""
+            color = "#5c6b7a" if p.folded else "#e6edf3"
+            rows.append(f"<tr style='color:{color};'><td>{p.name}</td><td>&nbsp;{p.pos}&nbsp;</td><td>{cards}</td>"
+                        f"<td>&nbsp;стек {p.stack:g}&nbsp;</td><td>{state}{turn}</td>"
+                        f"<td style='color:#8fa3b8;'>&nbsp;{self._style_name(p)}</td></tr>")
+        hero = g.players[H]
+        board = " ".join(card_html(c, 28) for c in g.board) or '<span style="color:#5c6b7a;">борд ещё не открыт</span>'
+        mine = f"<br><span style='color:#8fa3b8;'>ваша ставка на улице: {hero.inv:g}</span>" if hero.inv else ""
         self.table.setText(
-            f"<p>Оппонент · {g.pos[V]} · стек {g.stack[V]:g} bb<br><br>{vil}</p>"
-            f"<p><br>{board}<br><br><span style='font-size:18px; color:#ffd54f;'>Банк {(g.final_pot if g.finished else g.pot):g} bb</span>{bets}</p>"
-            f"<p><br>{' '.join(card_html(c, 30) for c in g.cards[H])}<br><br>Вы · {g.pos[H]} · стек {g.stack[H]:g} bb</p>")
+            f"<table cellpadding='2'>{''.join(rows)}</table>"
+            f"<p align='center'><br>{board}<br><br><span style='font-size:18px; color:#ffd54f;'>"
+            f"Банк {(g.final_pot if g.finished else g.pot):g} bb</span></p>"
+            f"<p align='center'>{' '.join(card_html(c, 28) for c in hero.cards)}<br><br>"
+            f"Вы · {hero.pos} · стек {hero.stack:g} bb{mine}</p>")
         self.log.setPlainText("\n".join(g.log))
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
         if g.finished and not self.counted:
@@ -559,11 +586,14 @@ class GameTab(QWidget):
                 self.coach.append(f"\n— Итог раздачи —\n{g.result}\nРешений по совету тренера: "
                                   f"{ok} из {len(g.decisions)}\n" + "\n".join(lines))
         self.score.setText(f"Сыграно раздач: {self.hands} · общий итог: {self.total:+g} bb")
-        adj = g.stats.adjust()
-        about = "" if self.style.currentData() == "hidden" else g.style.about + " "
-        seen = f"Замечено — {g.stats.summary()}. " if g.stats.hands else "Наблюдений пока нет. "
-        self.profile.setText(about + seen + (f"Вывод тренера: {adj.label}." if adj.label else
-                                             "Вывод тренера: отклонений от стандартной игры пока не видно."))
+        notes = []
+        for i, p in enumerate(g.players):
+            if i == H:
+                continue
+            label = p.stats.adjust().label
+            verdict = f"<b>{label}</b>" if label else "отклонений пока не видно"
+            notes.append(f"{p.name}: {verdict} <span style='color:#8fa3b8;'>({p.stats.summary()})</span>")
+        self.profile.setText("<br>".join(notes))
         self.update_overlay()
 
 
@@ -756,7 +786,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         self.trainer = TrainerTab()
         self.game_tab = GameTab()
-        tabs.addTab(self.game_tab, "Игра против бота")
+        tabs.addTab(self.game_tab, "Игра против ботов")
         tabs.addTab(self.trainer, "Разбор ситуации")
         self.session = SessionTab()
         tabs.addTab(self.session, "Разбор сессии")

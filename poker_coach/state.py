@@ -78,6 +78,10 @@ class GameState(BaseModel):
         default_factory=list,
         description="Постфлоп-действия по порядку: (улица flop/turn/river, hero/villain, check/bet/raise/call)")
 
+    extra_villains: list[tuple[str, PreflopLine]] = Field(
+        default_factory=list,
+        description="Остальные оппоненты в банке (кроме основного): позиция и префлоп-линия относительно героя. "
+                    "В history их действия помечены 'v2', 'v3', ...")
     preflop_actions: str | None = Field(
         default=None, description="Префлоп-действия до героя в нотации PokerBench: 'UTG/2.0bb/BTN/call'")
     villain_adj: Adjust | None = Field(default=None, description="Поправки на профиль оппонента")
@@ -110,9 +114,10 @@ class GameState(BaseModel):
         if self.preflop_line == PreflopLine.UNOPENED and self.hero_pos == "BB":
             raise ValueError("Если до BB все сбросили, раздача окончена — решать нечего")
             hi, vi = POSITIONS.index(self.hero_pos), POSITIONS.index(self.villain_pos)
-            if self.preflop_line in VILLAIN_OPENED and vi > hi:
+            pre = self.preflop_line in PREFLOP_DECISIONS      # на постфлопе порядок не проверяем: бывает мультивей
+            if pre and self.preflop_line in VILLAIN_OPENED and vi > hi:
                 raise ValueError(f"Оппонент на {self.villain_pos} ходит после {self.hero_pos} и не мог открыться раньше героя")
-            if self.preflop_line in HERO_OPENED and hi > vi:
+            if pre and self.preflop_line in HERO_OPENED and hi > vi:
                 raise ValueError(f"Герой на {self.hero_pos} ходит после {self.villain_pos} и не мог открыться раньше оппонента")
         is_pre = self.preflop_line in PREFLOP_DECISIONS
         if is_pre and self.board:
@@ -132,3 +137,26 @@ class GameState(BaseModel):
         if self.villain_pos is None:
             return True
         return POSTFLOP_ORDER.index(self.hero_pos) > POSTFLOP_ORDER.index(self.villain_pos)
+
+
+def classify_preflop(actions: str, hero_pos: str) -> tuple[PreflopLine, str | None]:
+    """Префлоп-линия героя по записи действий до него ('UTG/2.0bb/BTN/call') -> (линия, позиция оппонента)."""
+    t = [x for x in actions.split("/") if x]
+    acts = list(zip(t[::2], t[1::2]))
+    is_raise = lambda a: a.endswith("bb") or a == "allin"
+    raisers = [p for p, a in acts if is_raise(a)]
+    n = len(raisers)
+    last_i = max((i for i, (_p, a) in enumerate(acts) if is_raise(a)), default=-1)
+    callers = [p for p, a in acts[last_i + 1:] if a == "call"]
+    if n == 0:
+        return (PreflopLine.UNOPENED, None) if not callers and hero_pos != "BB" else (PreflopLine.OTHER, None)
+    if callers or any(a == "allin" for _p, a in acts) or n > 3:
+        return PreflopLine.OTHER, None
+    last, idx = raisers[-1], POSITIONS.index
+    if n == 1 and last != hero_pos and idx(last) < idx(hero_pos):
+        return PreflopLine.VS_OPEN, last
+    if n == 2 and raisers[0] == hero_pos and idx(hero_pos) < idx(last):
+        return PreflopLine.VS_3BET, last
+    if n == 3 and raisers[1] == hero_pos and raisers[0] == last and idx(last) < idx(hero_pos):
+        return PreflopLine.VS_4BET, last
+    return PreflopLine.OTHER, None

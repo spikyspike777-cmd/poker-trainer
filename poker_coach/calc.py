@@ -116,3 +116,36 @@ def is_weak_showdown(cards, board) -> bool:
     mine = [c.rank for c in cards]
     pair_rank = mine[0] if mine[0] == mine[1] else next(r for r in mine if r in board_ranks)
     return pair_rank < board_ranks[-2]
+
+
+def equity_multiway(hero, ranges: list[list[Combo]], board, iters: int = 2500, seed: int = 0) -> float:
+    """Эквити героя против нескольких диапазонов сразу (Монте-Карло). Ничья делит банк поровну."""
+    import random
+    rng = random.Random(seed)
+    base_dead = set(hero) | set(board)
+    ranges = [live_combos(r, base_dead) for r in ranges]
+    if any(not r for r in ranges):
+        raise ValueError("В диапазоне одного из оппонентов не осталось рук")
+    deck = [c for c in eval7.Deck().cards if c not in base_dead]
+    need, score, done = 5 - len(board), 0.0, 0
+    for _ in range(iters):
+        used, hands = set(), []
+        for r in ranges:
+            for _try in range(8):
+                c = r[rng.randrange(len(r))]
+                if c[0] not in used and c[1] not in used:
+                    used.update(c)
+                    hands.append(c)
+                    break
+        if len(hands) < len(ranges):
+            continue
+        rest = [c for c in deck if c not in used]
+        full = board + rng.sample(rest, need)
+        hv = eval7.evaluate(hero + full)
+        best = max(eval7.evaluate(list(h) + full) for h in hands)
+        done += 1
+        if hv > best:
+            score += 1
+        elif hv == best:
+            score += 0.5
+    return score / max(done, 1)

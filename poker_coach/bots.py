@@ -48,8 +48,6 @@ def restyle(style: Style, rng: random.Random, *, preflop: bool, kind: str, to: f
     """Исказить базовое решение (kind, to) под характер. kind: fold/check/call/raise."""
     r = rng.random
     if preflop:
-        if raises == 0:
-            return kind, to                    # открывается бот всегда: иначе герой остаётся без решения
         if kind in ("call", "raise") and r() < style.pre_drop and not charts.in_range(cards, _PREMIUM):
             return "fold", 0.0
         if kind == "fold" and to_call > 0 and playable(cards) and r() < style.pre_add:

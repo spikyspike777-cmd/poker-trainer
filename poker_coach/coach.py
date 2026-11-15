@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import calc, charts, preflop_gto, ranges
+from .params import P
 from .solver import RiverCFR, Solver, Spot
 from .state import GameState, PreflopLine as L, to_eval7
 
@@ -67,14 +68,22 @@ def analyze(state: GameState, use_table: bool = True) -> Analysis:
     vr = ranges.villain_range(state)
     a = Analysis(action="fold", villain=vr, spr=calc.spr(state.stack, state.pot),
                  required=calc.pot_odds(state.pot, state.to_call))
-    if vr is not None:
+    multiway = bool(board and state.extra_villains and vr is not None)
+    if multiway:
+        a.equity = calc.equity_multiway(hero, [vr.combos] + ranges.extra_ranges(state), board)
+    elif vr is not None:
         a.equity = calc.equity_vs_range(hero, vr.combos, board)
     if board:
         a.hand = calc.hand_name(hero, board)
         a.outs = calc.outs(hero, board)
-        _postflop(state, a)
         adj = state.villain_adj
-        if adj is not None and adj.exploit:
+        if multiway:
+            _postflop_multiway(state, a)
+        else:
+            _postflop(state, a)
+        if multiway:
+            pass                             # ни солвер, ни профиль одного оппонента тут не применимы
+        elif adj is not None and adj.exploit:
             _exploit(state, a, adj)          # солвер считает оппонента равновесным — тут он не подходит
         elif SOLVER is not None and state.hero_invested == 0:
             _solve(state, a, hero, board)
@@ -247,8 +256,9 @@ def _postflop(s: GameState, a: Analysis) -> None:
     if s.to_call > 0:
         a.reasons.append(f"Нужно доставить {s.to_call:g} bb в банк {s.pot:g} bb — колл окупается "
                          f"при эквити от {a.required:.0%}.")
-        margin = 0.02 if river else (-0.04 if draw and s.stack - s.to_call >= 2 * s.pot else 0.0)
-        if eq >= (0.80 if river else 0.72):
+        margin = P["call_margin_river"] if river else (
+            P["call_margin"] - 0.04 if draw and s.stack - s.to_call >= 2 * s.pot else P["call_margin"])
+        if eq >= (P["raise_eq_river"] if river else P["raise_eq"]):
             raise_to = round(s.to_call * 3, 1)
             if raise_to >= s.stack * 0.6:
                 a.action = "allin"
@@ -267,17 +277,17 @@ def _postflop(s: GameState, a: Analysis) -> None:
         else:
             a.reasons.append(f"Эквити {eq:.0%} ниже нужных {a.required:.0%} — колл в минус.")
     else:
-        if eq >= 0.80:
+        if eq >= P["value_big"]:
             _bet(s, a, 0.75)
             a.reasons.append("Очень сильная рука против его диапазона — крупный бет для велью.")
-        elif eq >= 0.65:
+        elif eq >= P["value"]:
             _bet(s, a, 0.5)
             a.reasons.append("Вы впереди большей части его диапазона — бет для велью и защиты от дро.")
-        elif eq >= 0.5 and not river and s.in_position:
+        elif eq >= P["thin"] and not river and s.in_position:
             _bet(s, a, 0.33)
             a.reasons.append("Средняя по силе рука в позиции — небольшой бет: добрать с худших рук "
                              "и не раздувать банк.")
-        elif draw and not river and eq >= 0.3:
+        elif draw and not river and eq >= P["semibluff_eq"]:
             _bet(s, a, 0.5)
             a.reasons.append("Сильное дро — полублеф: можно выиграть сразу, а если заколлируют, "
                              "остаются ауты.")
@@ -290,6 +300,45 @@ def _postflop(s: GameState, a: Analysis) -> None:
                      + (" — стеки мелкие, любая крупная ставка ведёт к олл-ину." if a.spr < 3 else "."))
 
 
+def _postflop_multiway(s: GameState, a: Analysis) -> None:
+    """Банк на трёх и более игроков: осторожная эвристика (солверы такие споты не решают)."""
+    k = len(s.extra_villains) + 1
+    eq, n_outs, river = a.equity, calc.count_outs(a.outs), s.street == "river"
+    a.source = f"эвристика для банка на {k + 1} игроков (солверы такие споты не решают)"
+    a.reasons.append(f"Сейчас у вас {a.hand}. В банке {k} оппонента(ов): ваше эквити против всех их диапазонов "
+                     f"сразу — {eq:.0%} (при равных силах было бы {1 / (k + 1):.0%}).")
+    if n_outs:
+        parts = ", ".join(f"{len(v)} на {name}" for name, v in a.outs.items())
+        a.reasons.append(f"Аутов: {n_outs} ({parts}).")
+    if s.to_call > 0:
+        a.reasons.append(f"Нужно доставить {s.to_call:g} bb в банк {s.pot:g} bb — колл окупается "
+                         f"при эквити от {a.required:.0%}.")
+        margin = 0.04 if river else (-0.03 if n_outs >= 8 else 0.0)
+        if eq >= 0.65:
+            raise_to = round(s.to_call * 3, 1)
+            if raise_to >= s.stack * 0.6:
+                a.action = "allin"
+            else:
+                a.action, a.amount, a.sizing = "raise", raise_to, "3× ставки"
+            a.reasons.append("Рука сильнее диапазонов всех оппонентов вместе — рейз для велью.")
+        elif eq >= a.required + margin:
+            a.action, a.amount = "call", s.to_call
+            a.reasons.append("Эквити хватает для колла. Рейзить не стоит: за вами ещё игроки, "
+                             "и против нескольких диапазонов рука недостаточно сильна.")
+        else:
+            a.reasons.append(f"Эквити {eq:.0%} ниже нужных {a.required:.0%} — фолд.")
+    elif eq >= 0.55:
+        _bet(s, a, 0.66)
+        a.reasons.append("Сильная рука против нескольких оппонентов — ставка для велью и защиты: "
+                         "чем больше игроков, тем чаще кто-то из них усилится.")
+    else:
+        a.action = "check"
+        a.reasons.append("Против нескольких оппонентов блефы и полублефы почти не работают: "
+                         "хотя бы один из них обычно попал в борд. Чек.")
+    a.reasons.append(f"Вы {'в позиции' if s.in_position else 'без позиции'} к основному оппоненту; "
+                     f"SPR (стек к банку) = {a.spr:.1f}.")
+
+
 def _exploit(s: GameState, a: Analysis, adj) -> None:
     """Поправить эвристический совет под отклонения конкретного оппонента."""
     a.reasons.insert(0, f"Профиль оппонента за {adj.hands} раздач — {adj.label}: " + "; ".join(adj.notes) + ".")
@@ -298,7 +347,7 @@ def _exploit(s: GameState, a: Analysis, adj) -> None:
     if s.to_call > 0 or ftb is None:
         return
     river = s.street == "river"
-    if ftb >= 0.42 and a.action == "check" and eq < 0.5:
+    if ftb >= 0.5 and a.action == "check" and eq < 0.5:
         _bet(s, a, 0.5)
         a.reasons.append(f"Блеф: сама рука слабая, но он сбрасывает на ставку примерно в {ftb:.0%} случаев. "
                          f"Ставке в полбанка достаточно срабатывать в 33% случаев.")

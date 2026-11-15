@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 import eval7
 
 RFI = {
@@ -74,8 +76,8 @@ def rfi_range(pos: str) -> str:
 
 def vs_open_ranges(hero_pos: str, opener_pos: str) -> tuple[str, str]:
     g = _group(opener_pos)
-    if hero_pos != "BB" and g == "SB":  # так не бывает, но не падаем
-        g = "BTN"
+    if g == "BB" or (hero_pos != "BB" and g == "SB"):   # рейз из блайндов против лимпа — берём самую широкую группу
+        g = "SB" if hero_pos == "BB" else "BTN"
     if hero_pos == "SB" and g != "BTN":
         # SB без позиции играет 3-бет или фолд.
         three, _call = _VS_OPEN[(False, g)]
@@ -108,9 +110,18 @@ def chen(key: str) -> float:
     return score
 
 
-def scale_range(range_str: str, factor: float):
-    """Диапазон в `factor` раз уже или шире: убираем слабейшие руки или добавляем лучшие из остальных."""
-    base = combos(range_str)
+@lru_cache(maxsize=None)
+def keys_to_combos(keys: tuple[str, ...]) -> tuple:
+    """('AKs', '77') -> все комбинации этих рук."""
+    return tuple(c for k in keys for c in combos(k))
+
+
+def scale_range(rng, factor: float):
+    """Диапазон в `factor` раз уже или шире: убираем слабейшие руки или добавляем лучшие из остальных.
+
+    rng — строка в нотации диапазонов или готовый список комбинаций.
+    """
+    base = combos(rng) if isinstance(rng, str) else list(rng)
     if abs(factor - 1) < 0.05 or not base:
         return base
     key = lambda c: chen(hand_key([str(c[0]), str(c[1])]))

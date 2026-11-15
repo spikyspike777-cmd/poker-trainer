@@ -62,16 +62,16 @@ def test_bots_differ(monkeypatch):
     monkeypatch.setattr(coach.SOLVER, "iterations", 20)
     seen = {}
     for style in ("nit", "station"):
-        g = Game(random.Random(2), style=style, use_profile=False)
+        g = Game(n_players=2, styles=style, rng=random.Random(2), use_profile=False)
         r = random.Random(3)
-        for i in range(120):
+        for i in range(150):
             if i:
                 g.new_hand()
             while not g.finished:
                 opts = g.options()
                 agg = [o for o in opts if o.kind == "raise"]
                 g.hero_act(agg[0] if agg and r.random() < 0.7 else opts[-2] if len(opts) > 1 else opts[0])
-        seen[style] = g.stats
+        seen[style] = g.players[1].stats
     fold = lambda s: s.folded_to_bet / s.faced_bet
     assert fold(seen["station"]) < 0.15 < 0.3 < fold(seen["nit"])
     assert "редко сбрасывает" in seen["station"].adjust().label

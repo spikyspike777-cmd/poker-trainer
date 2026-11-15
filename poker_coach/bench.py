@@ -24,6 +24,7 @@ from .state import POSITIONS, POSTFLOP_ORDER, GameState, PreflopLine as L
 DATA = Path(__file__).resolve().parent.parent / "data" / "pokerbench"
 URL = "https://huggingface.co/datasets/RZ412/PokerBench/resolve/main/"
 USE_HISTORY = True
+CHART_RANGES = False
 PRE = "preflop_1k_test_set_game_scenario_information.csv"
 POST = "postflop_10k_test_set_game_scenario_information.csv"
 
@@ -126,7 +127,9 @@ def postflop_predict(row: dict) -> tuple[str, str]:
 
 
 def _post_job(args):
-    row, use_solver, use_history = args
+    row, use_solver, use_history, chart_ranges = args
+    from .params import P
+    P["table_ranges"] = 0 if chart_ranges else P["table_ranges"]
     global USE_HISTORY
     USE_HISTORY = use_history
     if not use_solver:
@@ -146,7 +149,7 @@ def run_postflop(n: int, use_solver: bool, seed: int = 0, procs: int = 4):
     if n and n < len(rows):
         rows = random.Random(seed).sample(rows, n)
     with Pool(procs) as pool:
-        res = pool.map(_post_job, [(r, use_solver, USE_HISTORY) for r in rows], chunksize=8)
+        res = pool.map(_post_job, [(r, use_solver, USE_HISTORY, CHART_RANGES) for r in rows], chunksize=8)
     return res
 
 
@@ -254,6 +257,7 @@ def main() -> None:
     p.add_argument("--n", type=int, default=2000, help="размер выборки постфлопа, 0 — все 10k")
     p.add_argument("--no-solver", action="store_true")
     p.add_argument("--no-history", action="store_true", help="не сужать диапазоны по истории ставок")
+    p.add_argument("--chart-ranges", action="store_true", help="диапазоны только по ручным чартам")
     p.add_argument("--no-table", action="store_true", help="префлоп только по ручным чартам")
     p.add_argument("--skip-postflop", action="store_true")
     p.add_argument("--skip-preflop", action="store_true")
@@ -264,6 +268,8 @@ def main() -> None:
     if coach.SOLVER is not None:
         coach.SOLVER.iterations = a.iterations
     coach.USE_GTO_TABLE = not a.no_table
+    global CHART_RANGES
+    CHART_RANGES = a.chart_ranges
     pre = [] if a.skip_preflop else run_preflop()
     post = [] if a.skip_postflop else run_postflop(a.n, not a.no_solver)
     print(report(pre, post))
