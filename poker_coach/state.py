@@ -82,6 +82,8 @@ class GameState(BaseModel):
         default_factory=list,
         description="Остальные оппоненты в банке (кроме основного): позиция и префлоп-линия относительно героя. "
                     "В history их действия помечены 'v2', 'v3', ...")
+    in_position_override: bool | None = Field(
+        default=None, description="Явно заданная позиция относительно оппонента (для столов больше шести игроков)")
     preflop_actions: str | None = Field(
         default=None, description="Префлоп-действия до героя в нотации PokerBench: 'UTG/2.0bb/BTN/call'")
     villain_adj: Adjust | None = Field(default=None, description="Поправки на профиль оппонента")
@@ -109,7 +111,7 @@ class GameState(BaseModel):
         elif self.preflop_line != PreflopLine.UNOPENED:
             if self.villain_pos not in POSITIONS:
                 raise ValueError("Укажите позицию оппонента")
-            if self.villain_pos == self.hero_pos:
+            if self.villain_pos == self.hero_pos and self.in_position_override is None:
                 raise ValueError("Герой и оппонент не могут сидеть на одной позиции")
         if self.preflop_line == PreflopLine.UNOPENED and self.hero_pos == "BB":
             raise ValueError("Если до BB все сбросили, раздача окончена — решать нечего")
@@ -134,6 +136,8 @@ class GameState(BaseModel):
 
     @property
     def in_position(self) -> bool:
+        if self.in_position_override is not None:
+            return self.in_position_override
         if self.villain_pos is None:
             return True
         return POSTFLOP_ORDER.index(self.hero_pos) > POSTFLOP_ORDER.index(self.villain_pos)

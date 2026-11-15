@@ -382,7 +382,7 @@ class GameTab(QWidget):
         ol = QVBoxLayout(obox)
         orow = QHBoxLayout()
         self.count = QComboBox()
-        for n in range(2, 7):
+        for n in range(2, 10):
             self.count.addItem(f"{n} игроков" if n > 4 else f"{n} игрока", n)
         self.count.setCurrentIndex(4)
         self.style = QComboBox()
@@ -410,6 +410,7 @@ class GameTab(QWidget):
         self.table.setTextFormat(Qt.RichText)
         self.table.setMinimumHeight(250)
         self.table.setAlignment(Qt.AlignTop)
+        self.table.setStyleSheet("font-size:12px;")
         tl.addWidget(self.table)
         left.addWidget(table)
         self.actions = QHBoxLayout()
@@ -561,7 +562,7 @@ class GameTab(QWidget):
             state = "сбросил" if p.folded else (f"ставка {p.inv:g}" if p.inv else "в игре")
             turn = " ◀ ходит" if g.to_act == i else ""
             color = "#5c6b7a" if p.folded else "#e6edf3"
-            rows.append(f"<tr style='color:{color};'><td>{p.name}</td><td>&nbsp;{p.pos}&nbsp;</td><td>{cards}</td>"
+            rows.append(f"<tr style='color:{color};'><td>{p.name}</td><td>&nbsp;{p.label}&nbsp;</td><td>{cards}</td>"
                         f"<td>&nbsp;стек {p.stack:g}&nbsp;</td><td>{state}{turn}</td>"
                         f"<td style='color:#8fa3b8;'>&nbsp;{self._style_name(p)}</td></tr>")
         hero = g.players[H]
@@ -572,7 +573,7 @@ class GameTab(QWidget):
             f"<p align='center'><br>{board}<br><br><span style='font-size:18px; color:#ffd54f;'>"
             f"Банк {(g.final_pot if g.finished else g.pot):g} bb</span></p>"
             f"<p align='center'>{' '.join(card_html(c, 28) for c in hero.cards)}<br><br>"
-            f"Вы · {hero.pos} · стек {hero.stack:g} bb{mine}</p>")
+            f"Вы · {hero.label} · стек {hero.stack:g} bb{mine}</p>")
         self.log.setPlainText("\n".join(g.log))
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
         if g.finished and not self.counted:

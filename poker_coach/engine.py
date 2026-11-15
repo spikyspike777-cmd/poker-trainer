@@ -15,13 +15,32 @@ import eval7
 from . import bots, calc, charts, preflop_gto
 from .coach import Analysis, analyze, matches
 from .profile import BASE_VPIP, PlayerStats
-from .state import POSITIONS, POSTFLOP_ORDER, RANKS, SUITS, GameState, PreflopLine as L, classify_preflop, to_eval7
+from .state import POSITIONS, RANKS, SUITS, GameState, PreflopLine as L, classify_preflop, to_eval7
 
 H = 0                                   # индекс героя за столом
 STREETS = ["preflop", "flop", "turn", "river"]
 STREET_RU = {"preflop": "Префлоп", "flop": "Флоп", "turn": "Тёрн", "river": "Ривер"}
+# За столами на 7–9 игроков добавляются ранние позиции. Чартов и таблицы солвера для них нет,
+# поэтому тренер считает их как UTG (самый узкий диапазон стола 6-max).
+EARLY = ["EP1", "EP2", "EP3"]
 SEATS_BY_N = {2: ["BTN", "BB"], 3: ["BTN", "SB", "BB"], 4: ["CO", "BTN", "SB", "BB"],
-              5: ["HJ", "CO", "BTN", "SB", "BB"], 6: POSITIONS}
+              5: ["HJ", "CO", "BTN", "SB", "BB"], 6: POSITIONS,
+              7: EARLY[2:] + POSITIONS, 8: EARLY[1:] + POSITIONS, 9: EARLY + POSITIONS}
+POSTFLOP_FULL = ["SB", "BB"] + EARLY + ["UTG", "HJ", "CO", "BTN"]
+_NAMES = {7: ["UTG", "LJ"], 8: ["UTG", "UTG+1", "LJ"], 9: ["UTG", "UTG+1", "UTG+2", "LJ"]}
+
+
+def model_pos(pos: str) -> str:
+    """Позиция, по которой тренер ищет чарты: ранние позиции больших столов играются как UTG."""
+    return "UTG" if pos in EARLY else pos
+
+
+def display_pos(pos: str, n: int) -> str:
+    """Привычное название позиции за столом на n игроков."""
+    seats = SEATS_BY_N[n]
+    names = _NAMES.get(n, [])
+    i = seats.index(pos)
+    return names[i] if i < len(names) else pos
 _SHOVE_RANGE = "KK+, AKs"
 
 
@@ -45,7 +64,8 @@ class Player:
     name: str
     style: bots.Style
     stats: PlayerStats = field(default_factory=PlayerStats)     # что герой заметил за этим ботом
-    pos: str = ""
+    pos: str = ""                        # внутреннее имя места (уникально за столом)
+    label: str = ""                      # название позиции для показа
     cards: list[str] = field(default_factory=list)
     stack: float = 100.0
     inv: float = 0.0                     # вложено на текущей улице
@@ -95,7 +115,7 @@ class Game:
             blind = {"BTN": 0.5, "BB": 1.0}
         for k, pos in enumerate(ring):
             p = self.players[(self.button + 1 + k) % n]
-            p.pos, p.cards = pos, [deck.pop(), deck.pop()]
+            p.pos, p.label, p.cards = pos, display_pos(pos, n), [deck.pop(), deck.pop()]
             p.inv = blind.get(pos, 0.0)
             p.stack, p.folded = 100.0 - p.inv, False
         self._runout = deck[:5]
@@ -112,14 +132,14 @@ class Game:
         self.pending = self._order()              # кому ещё ходить на этой улице
         self.finished, self.result, self.net, self.final_pot = False, "", 0.0, 0.0
         self.shown: set[int] = set()
-        seats_txt = ", ".join(f"{p.name} — {p.pos}" for p in self.players)
+        seats_txt = ", ".join(f"{p.name} — {p.label}" for p in self.players)
         self.log: list[str] = [f"Игроков: {n}. {seats_txt}."]
         self.decisions: list[Decision] = []
         self.last: Decision | None = None
 
     def _order(self) -> list[int]:
         """Игроки, которые ещё в раздаче и не в олл-ине, в порядке хода на текущей улице."""
-        order = SEATS_BY_N[self.n] if self.street == "preflop" else [p for p in POSTFLOP_ORDER if p in SEATS_BY_N[self.n]]
+        order = SEATS_BY_N[self.n] if self.street == "preflop" else [p for p in POSTFLOP_FULL if p in SEATS_BY_N[self.n]]
         by_pos = {p.pos: i for i, p in enumerate(self.players)}
         return [by_pos[pos] for pos in order if not self.players[by_pos[pos]].folded
                 and self.players[by_pos[pos]].stack > 0]
@@ -136,7 +156,7 @@ class Game:
         return [i for i, p in enumerate(self.players) if not p.folded]
 
     def _ip(self, i: int, j: int) -> bool:
-        return POSTFLOP_ORDER.index(self.players[i].pos) > POSTFLOP_ORDER.index(self.players[j].pos)
+        return POSTFLOP_FULL.index(self.players[i].pos) > POSTFLOP_FULL.index(self.players[j].pos)
 
     # ---------- состояние и совет для игрока i ----------
 
@@ -163,28 +183,31 @@ class Game:
 
     def state(self, i: int = H) -> GameState:
         p = self.players[i]
+        pos = model_pos(p.pos)
         to_call = max(0.0, round(min(self.cur - p.inv, p.stack), 2))
-        common = dict(hero_cards=p.cards, board=self.board, hero_pos=p.pos, pot=max(self.pot, to_call + 0.1),
+        common = dict(hero_cards=p.cards, board=self.board, hero_pos=pos, pot=max(self.pot, to_call + 0.1),
                       to_call=to_call, stack=p.stack)
         if self.street == "preflop":
             actions = "/".join(self.pre_tokens)
-            line, vpos = classify_preflop(actions, p.pos)
+            line, vpos = classify_preflop(actions, pos)
+            v = self.pre_raisers[-1] if vpos is not None else None
             return GameState(**common, villain_pos=vpos, preflop_line=line, preflop_actions=actions,
-                             villain_adj=self._adjust_for(i, vpos))
+                             in_position_override=self._ip(i, v) if v is not None else None,
+                             villain_adj=self._adjust_for(i, v))
         v = self._main_villain(i)
         extras = [j for j in self.alive() if j not in (i, v)]
         names = {i: "hero", v: "villain", **{j: f"v{k}" for k, j in enumerate(extras, start=2)}}
         hist = [(st, names[w], k) for st, w, k in self.history if w in names]
         return GameState(
-            **common, villain_pos=self.players[v].pos, preflop_line=self._relation(i, v), hero_invested=p.inv,
-            history=hist, extra_villains=[(self.players[j].pos, self._relation(i, j)) for j in extras],
-            villain_adj=self._adjust_for(i, self.players[v].pos))
+            **common, villain_pos=model_pos(self.players[v].pos), preflop_line=self._relation(i, v),
+            hero_invested=p.inv, history=hist, in_position_override=self._ip(i, v),
+            extra_villains=[(model_pos(self.players[j].pos), self._relation(i, j)) for j in extras],
+            villain_adj=self._adjust_for(i, v))
 
-    def _adjust_for(self, me: int, villain_pos: str | None):
+    def _adjust_for(self, me: int, v: int | None):
         """Поправки на профиль оппонента: герою — про бота, адаптивному боту — про героя."""
-        if villain_pos is None:
+        if v is None:
             return None
-        v = next(j for j, p in enumerate(self.players) if p.pos == villain_pos)
         if me == H:
             return self.players[v].stats.adjust() if self.use_profile else None
         return self.hero_stats.adjust() if self.adaptive and v == H else None
@@ -224,7 +247,7 @@ class Game:
         if self.street == "preflop":
             limpers = sum(1 for t in self.pre_tokens if t.endswith("/call")) if self.raises == 0 else 0
             if self.raises == 0:
-                sizes.append(("Рейз", charts.OPEN_SIZE.get(p.pos, 2.5) + limpers))
+                sizes.append(("Рейз", charts.OPEN_SIZE.get(model_pos(p.pos), 2.5) + limpers))
             elif self.raises == 1:
                 sizes.append(("3-бет", round(self.cur * 3.5, 1)))
             elif self.raises == 2:
@@ -297,7 +320,7 @@ class Game:
         if i in self.seen_pre or kind == "check":
             return
         self.seen_pre.add(i)
-        stats.record_preflop(kind != "fold", kind == "raise", self._expected_continue(p.pos))
+        stats.record_preflop(kind != "fold", kind == "raise", self._expected_continue(model_pos(p.pos)))
 
     def _expected_continue(self, pos: str) -> float:
         """Доля рук, с которыми солвер продолжает игру в текущей префлоп-линии."""
@@ -311,13 +334,14 @@ class Game:
         p = self.players[i]
         self._record(i, kind)
         pre = self.street == "preflop"
-        tag = f"{STREET_RU[self.street]}: {p.name} ({p.pos})"
+        tag = f"{STREET_RU[self.street]}: {p.name} ({p.label})"
+        mp = model_pos(p.pos)
         self.pending.remove(i)
         if kind == "fold":
             p.folded = True
             self.log.append(f"{tag} — фолд.")
             if pre and i in self.voluntary:
-                self.pre_tokens.append(f"{p.pos}/fold")
+                self.pre_tokens.append(f"{mp}/fold")
             if len(self.alive()) == 1:
                 self._finish([self.alive()[0]])
             return
@@ -331,7 +355,7 @@ class Game:
             self._pay(p, pay)
             self.log.append(f"{tag} — колл {pay:g}" + (" (олл-ин)." if p.stack == 0 else "."))
             if pre:
-                self.pre_tokens.append(f"{p.pos}/call")
+                self.pre_tokens.append(f"{mp}/call")
                 self.voluntary.add(i)
             else:
                 self.history.append((self.street, i, "call"))
@@ -345,7 +369,7 @@ class Game:
         if pre:
             self.raises += 1
             self.pre_raisers.append(i)
-            self.pre_tokens.append(f"{p.pos}/" + ("allin" if allin else f"{to:.1f}bb"))
+            self.pre_tokens.append(f"{mp}/" + ("allin" if allin else f"{to:.1f}bb"))
             self.voluntary.add(i)
         else:
             self.history.append((self.street, i, "bet" if first_bet else "raise"))
@@ -355,7 +379,7 @@ class Game:
 
     def _after(self, j: int, i: int) -> bool:
         """Ходит ли игрок j после игрока i на текущей улице."""
-        order = SEATS_BY_N[self.n] if self.street == "preflop" else [p for p in POSTFLOP_ORDER if p in SEATS_BY_N[self.n]]
+        order = SEATS_BY_N[self.n] if self.street == "preflop" else [p for p in POSTFLOP_FULL if p in SEATS_BY_N[self.n]]
         return order.index(self.players[j].pos) > order.index(self.players[i].pos)
 
     @staticmethod

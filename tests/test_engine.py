@@ -12,7 +12,7 @@ def fast_solver(monkeypatch):
     monkeypatch.setattr(coach.SOLVER, "turn_iterations", 15, raising=False)
 
 
-@pytest.mark.parametrize("n", [2, 3, 4, 6])
+@pytest.mark.parametrize("n", [2, 3, 6, 9])
 def test_random_playouts_conserve_chips(n):
     r = random.Random(7 + n)
     g = Game(n_players=n, styles="random", rng=r)
@@ -61,6 +61,10 @@ def test_positions_rotate_and_blinds_posted():
         blinds = {p.pos: p.inv for p in g.players if p.inv}
         assert blinds == {"SB": 0.5, "BB": 1.0}
     assert seen == {"UTG", "HJ", "CO", "BTN", "SB", "BB"}
+    g9 = Game(n_players=9, rng=random.Random(1))
+    g9._deal()
+    assert sorted(p.label for p in g9.players) == sorted(["UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO", "BTN", "SB", "BB"])
+    assert {p.label: p.inv for p in g9.players if p.inv} == {"SB": 0.5, "BB": 1.0}
     g2 = Game(n_players=2, rng=random.Random(1))
     g2._deal()
     assert {p.pos: p.inv for p in g2.players} == {"BTN": 0.5, "BB": 1.0}
