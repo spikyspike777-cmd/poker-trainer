@@ -1,7 +1,9 @@
-//! CFR+ солвер тёрна и ривера для игры один на один.
+//! CFR+ солвер флопа, тёрна и ривера для игры один на один.
 //!
-//! Игрок 0 — без позиции (ходит первым), игрок 1 — в позиции. Силы рук на каждой возможной
-//! карте ривера считает Python (eval7) и передаёт сюда; здесь только дерево и CFR.
+//! Игрок 0 — без позиции (ходит первым), игрок 1 — в позиции. Силы рук на каждом возможном
+//! продолжении борда считает Python (eval7) и передаёт сюда; здесь только деревья и CFR.
+//! Улицы вложены рекурсивно: у каждого листа улицы свой набор деревьев следующей улицы,
+//! по одному на каждую карту, которая может выйти.
 //! Вскрытие считается за O(n) на узел: руки отсортированы по силе, а пересечения по картам
 //! вычитаются через суммы «по карте».
 
@@ -133,36 +135,85 @@ impl Store {
     }
 }
 
-/// Данные вскрытия для одной карты ривера.
+/// Данные вскрытия для одного полного борда.
 struct Show {
     strength: [Vec<u32>; 2],
     order: [Vec<usize>; 2], // индексы рук по возрастанию силы
-    valid: [Vec<bool>; 2],  // рука не содержит карту ривера
 }
 
-/// Неизменяемая часть задачи: диапазоны, силы рук, деревья.
+/// Что происходит, когда торговля на улице закончена.
+#[derive(Clone, Copy)]
+enum Next {
+    Show(usize), // вскрытие с данными shows[i]
+    Deal(usize), // выходит следующая карта: deals[i]
+}
+
+/// Выход карты: какие карты перебираем, с каким весом и что дальше после каждой.
+struct Deal {
+    cards: Vec<u8>,
+    weight: f64,
+    next: Vec<Next>,
+}
+
+/// Настройки дерева улицы глубже корня.
+struct StreetCfg {
+    sizes: Vec<f64>,
+    allow_raise: bool,
+}
+
+/// Экземпляр улицы: дерево, стратегии и вложенные улицы для каждого листа и каждой карты.
+struct Street {
+    tree: Tree,
+    store: Store,
+    after: Next,
+    leaf_of: Vec<usize>,    // узел -> номер листа (usize::MAX, если не лист)
+    kids: Vec<Vec<Street>>, // [лист][карта]
+}
+
+/// Неизменяемая часть задачи.
 struct Ctx {
     hands: [Vec<(u8, u8)>; 2],
     same: [Vec<Option<usize>>; 2], // индекс такой же комбинации в диапазоне оппонента
     shows: Vec<Show>,
-    stack: f64,
-    street: Tree,
-    leaf_of: Vec<usize>,     // узел дерева тёрна -> номер листа (usize::MAX, если не лист)
-    river_trees: Vec<Tree>,  // по одному на лист тёрна
-    river_weight: f64,
-}
-
-/// Где идёт обход: дерево тёрна (с листами-«выходом ривера») или дерево ривера на конкретной карте.
-enum Level<'a> {
-    Turn { store: &'a mut Store, rivers: &'a mut [Vec<Store>] },
-    River { tree: &'a Tree, store: &'a mut Store, ri: usize },
+    deals: Vec<Deal>,
+    raise_mult: f64,
 }
 
 type Util = (Vec<f64>, Vec<f64>);
 
+fn has(h: (u8, u8), card: u8) -> bool {
+    h.0 == card || h.1 == card
+}
+
 impl Ctx {
     fn n(&self, p: usize) -> usize {
         self.hands[p].len()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_street(&self, pot: f64, stack: f64, sizes: &[f64], extra: f64, lead: bool, allow_raise: bool,
+                   after: Next, deeper: &[StreetCfg]) -> Street {
+        let n = [self.n(0), self.n(1)];
+        let tree = build(pot, stack, sizes, extra, lead, &Cfg { raise_mult: self.raise_mult, allow_raise });
+        let store = Store::new(&tree, n);
+        let mut leaf_of = vec![usize::MAX; tree.nodes.len()];
+        let mut kids = vec![];
+        if let Next::Deal(d) = after {
+            for (id, nd) in tree.nodes.iter().enumerate() {
+                if nd.kind == Kind::Close {
+                    leaf_of[id] = kids.len();
+                    let c = nd.c[0];
+                    let row: Vec<Street> = self.deals[d]
+                        .next
+                        .iter()
+                        .map(|nx| self.make_street(pot + 2.0 * c, (stack - c).max(0.0), &deeper[0].sizes, 0.0, true,
+                                                   deeper[0].allow_raise, *nx, &deeper[1..]))
+                        .collect();
+                    kids.push(row);
+                }
+            }
+        }
+        Street { tree, store, after, leaf_of, kids }
     }
 
     /// Для каждой руки игрока `me`: суммарный вес рук оппонента, не пересекающихся с ней по картам.
@@ -229,21 +280,15 @@ impl Ctx {
         (win, lose)
     }
 
-    fn showdown(&self, ri: usize, pot: f64, c: f64, r0: &[f64], r1: &[f64]) -> Util {
-        let sh = &self.shows[ri];
+    fn showdown(&self, id: usize, pot: f64, c: f64, r0: &[f64], r1: &[f64]) -> Util {
+        let sh = &self.shows[id];
         let mut out: [Vec<f64>; 2] = [vec![], vec![]];
         for me in 0..2 {
             let opp_reach = if me == 0 { r1 } else { r0 };
             let comp = self.compat(me, opp_reach);
             let (win, lose) = self.win_lose(me, sh, opp_reach);
             out[me] = (0..self.n(me))
-                .map(|h| {
-                    if !sh.valid[me][h] {
-                        return 0.0;
-                    }
-                    let tie = comp[h] - win[h] - lose[h];
-                    (pot + c) * win[h] - c * lose[h] + pot / 2.0 * tie
-                })
+                .map(|h| (pot + c) * win[h] - c * lose[h] + pot / 2.0 * (comp[h] - win[h] - lose[h]))
                 .collect();
         }
         let [a, b] = out;
@@ -260,31 +305,25 @@ impl Ctx {
         }
     }
 
-    /// Лист тёрна: все карты ривера считаются параллельно, у каждой своё хранилище стратегий.
-    fn chance(&self, rivers: &mut [Store], leaf: usize, c: f64, r0: &[f64], r1: &[f64], iter: usize) -> Util {
-        let pot = self.street.pot + 2.0 * c;
-        let allin = self.stack - c < 1e-9;
-        let tree = &self.river_trees[leaf];
-        let parts: Vec<Util> = rivers
+    /// Лист улицы, после которого выходит карта: все карты считаются параллельно.
+    fn chance(&self, kids: &mut [Street], d: usize, c: f64, r0: &[f64], r1: &[f64], iter: usize) -> Util {
+        let deal = &self.deals[d];
+        let parts: Vec<Util> = kids
             .par_iter_mut()
             .enumerate()
-            .map(|(ri, store)| {
-                let sh = &self.shows[ri];
-                let q0: Vec<f64> = r0.iter().zip(&sh.valid[0]).map(|(r, v)| if *v { *r } else { 0.0 }).collect();
-                let q1: Vec<f64> = r1.iter().zip(&sh.valid[1]).map(|(r, v)| if *v { *r } else { 0.0 }).collect();
-                let (mut a, mut b) = if allin {
-                    self.showdown(ri, pot, 0.0, &q0, &q1)
-                } else {
-                    self.cfr(&mut Level::River { tree, store, ri }, 0, &q0, &q1, iter)
-                };
-                // полезность ривера считается от банка на начало ривера; переводим к началу тёрна
+            .map(|(i, kid)| {
+                let card = deal.cards[i];
+                let q0: Vec<f64> = r0.iter().zip(&self.hands[0]).map(|(r, h)| if has(*h, card) { 0.0 } else { *r }).collect();
+                let q1: Vec<f64> = r1.iter().zip(&self.hands[1]).map(|(r, h)| if has(*h, card) { 0.0 } else { *r }).collect();
+                let (mut a, mut b) = self.cfr(kid, 0, &q0, &q1, iter);
+                // полезность следующей улицы считается от её стартового банка; переводим к началу этой
                 let m0 = self.compat(0, &q1);
                 let m1 = self.compat(1, &q0);
                 for h in 0..a.len() {
-                    a[h] = if sh.valid[0][h] { (a[h] - c * m0[h]) * self.river_weight } else { 0.0 };
+                    a[h] = if has(self.hands[0][h], card) { 0.0 } else { (a[h] - c * m0[h]) * deal.weight };
                 }
                 for h in 0..b.len() {
-                    b[h] = if sh.valid[1][h] { (b[h] - c * m1[h]) * self.river_weight } else { 0.0 };
+                    b[h] = if has(self.hands[1][h], card) { 0.0 } else { (b[h] - c * m1[h]) * deal.weight };
                 }
                 (a, b)
             })
@@ -303,42 +342,32 @@ impl Ctx {
     }
 
     /// Один проход CFR+. iter == 0 — только оценка по средней стратегии, без обновления.
-    fn cfr(&self, level: &mut Level, node: usize, r0: &[f64], r1: &[f64], iter: usize) -> Util {
+    fn cfr(&self, st: &mut Street, node: usize, r0: &[f64], r1: &[f64], iter: usize) -> Util {
         let (kind, player, c, n_acts, children, pot) = {
-            let t = match level {
-                Level::Turn { .. } => &self.street,
-                Level::River { tree, .. } => *tree,
-            };
-            let nd = &t.nodes[node];
-            (nd.kind, nd.player, nd.c, nd.acts.len(), nd.children.clone(), t.pot)
+            let nd = &st.tree.nodes[node];
+            (nd.kind, nd.player, nd.c, nd.acts.len(), nd.children.clone(), st.tree.pot)
         };
         match kind {
             Kind::Fold => return self.fold(player, pot, c, r0, r1),
             Kind::Close => {
-                return match level {
-                    Level::River { ri, .. } => self.showdown(*ri, pot, c[0], r0, r1),
-                    Level::Turn { rivers, .. } => {
-                        let leaf = self.leaf_of[node];
-                        self.chance(&mut rivers[leaf], leaf, c[0], r0, r1, iter)
+                return match st.after {
+                    Next::Show(id) => self.showdown(id, pot, c[0], r0, r1),
+                    Next::Deal(d) => {
+                        let leaf = st.leaf_of[node];
+                        self.chance(&mut st.kids[leaf], d, c[0], r0, r1, iter)
                     }
                 };
             }
             Kind::Decision => {}
         }
         let n_me = self.n(player);
-        let strat = {
-            let st: &Store = match level {
-                Level::Turn { store, .. } => store,
-                Level::River { store, .. } => store,
-            };
-            strategy(st, node, n_me, n_acts, iter == 0)
-        };
+        let strat = strategy(&st.store, node, n_me, n_acts, iter == 0);
         let mut utils: Vec<Vec<f64>> = Vec::with_capacity(n_acts);
         let mut other = vec![0.0; self.n(1 - player)];
         let reach_me = if player == 0 { r0 } else { r1 };
         for (a, &ch) in children.iter().enumerate() {
             let q: Vec<f64> = (0..n_me).map(|h| reach_me[h] * strat[h * n_acts + a]).collect();
-            let (u0, u1) = if player == 0 { self.cfr(level, ch, &q, r1, iter) } else { self.cfr(level, ch, r0, &q, iter) };
+            let (u0, u1) = if player == 0 { self.cfr(st, ch, &q, r1, iter) } else { self.cfr(st, ch, r0, &q, iter) };
             let (mine, theirs) = if player == 0 { (u0, u1) } else { (u1, u0) };
             for (o, t) in other.iter_mut().zip(theirs) {
                 *o += t;
@@ -352,20 +381,42 @@ impl Ctx {
             }
         }
         if iter > 0 {
-            let st: &mut Store = match level {
-                Level::Turn { store, .. } => store,
-                Level::River { store, .. } => store,
-            };
             let w = iter as f64;
             for h in 0..n_me {
                 for a in 0..n_acts {
                     let i = h * n_acts + a;
-                    st.regret[node][i] = (st.regret[node][i] + utils[a][h] - mine[h]).max(0.0);
-                    st.ssum[node][i] += w * reach_me[h] * strat[i];
+                    st.store.regret[node][i] = (st.store.regret[node][i] + utils[a][h] - mine[h]).max(0.0);
+                    st.store.ssum[node][i] += w * reach_me[h] * strat[i];
                 }
             }
         }
         if player == 0 { (mine, other) } else { (other, mine) }
+    }
+
+    /// (сумма выигрышей, сумма весов) руки героя против достижимостей оппонента по всем продолжениям борда.
+    fn equity(&self, next: Next, me: usize, hand: usize, opp_reach: &[f64]) -> (f64, f64) {
+        match next {
+            Next::Show(id) => {
+                let comp = self.compat(me, opp_reach);
+                let (win, lose) = self.win_lose(me, &self.shows[id], opp_reach);
+                let (w, l, c) = (win[hand], lose[hand], comp[hand]);
+                (w + 0.5 * (c - w - l), c)
+            }
+            Next::Deal(d) => {
+                let deal = &self.deals[d];
+                let (mut num, mut den) = (0.0, 0.0);
+                for (i, &card) in deal.cards.iter().enumerate() {
+                    if has(self.hands[me][hand], card) {
+                        continue;
+                    }
+                    let q: Vec<f64> = opp_reach.iter().zip(&self.hands[1 - me]).map(|(r, h)| if has(*h, card) { 0.0 } else { *r }).collect();
+                    let (a, b) = self.equity(deal.next[i], me, hand, &q);
+                    num += a;
+                    den += b;
+                }
+                (num, den)
+            }
+        }
     }
 }
 
@@ -383,49 +434,53 @@ fn strategy(st: &Store, node: usize, n_hands: usize, n_acts: usize, average: boo
     s
 }
 
-/// Обход от узла дерева текущей улицы: ривер решается сразу, тёрн — с перебором карт ривера.
-#[allow(clippy::too_many_arguments)]
-fn run(s: &Ctx, is_river: bool, store: &mut Store, rivers: &mut [Vec<Store>], node: usize, r0: &[f64], r1: &[f64], it: usize) -> Util {
-    if is_river {
-        s.cfr(&mut Level::River { tree: &s.street, store, ri: 0 }, node, r0, r1, it)
-    } else {
-        s.cfr(&mut Level::Turn { store, rivers }, node, r0, r1, it)
-    }
+fn to_next(x: i64) -> Next {
+    if x >= 0 { Next::Show(x as usize) } else { Next::Deal((-x - 1) as usize) }
 }
 
-/// Решить спот и вернуть стратегию для руки героя.
+type Answer = (Vec<(u8, f64, f64, f64)>, f64, Vec<f64>, Vec<f64>, Vec<f64>);
+
+/// Решить спот.
 ///
-/// strengths[p][r][h] — сила руки h игрока p на карте ривера r (для ривера — один «ривер»);
-/// river_cards[r] — номер карты (0..51) или 255, если борд уже полный;
-/// path — действия на текущей улице до хода героя: (тип, сумма), тип 1 = чек, 3 = бет;
-/// возвращает (действия: (тип, сумма, частота, EV), эквити героя, веса рук оппонента).
+/// - hands*, w*: руки (номера карт 0..51) и их начальные веса;
+/// - strengths*[вскрытие][рука]: силы рук на каждом полном борде;
+/// - deal_*: описание выходов карт; next >= 0 — номер вскрытия, next < 0 — выход карты с номером -next-1;
+/// - root_next: что происходит после торговли на текущей улице (в том же кодировании);
+/// - deeper_sizes / deeper_raise: размеры ставок и разрешение рейза на следующих улицах;
+/// - path: действия на текущей улице до нужного узла: (тип, сумма), типы 0 фолд, 1 чек, 2 колл, 3 ставка или рейз;
+/// - want_reach: вернуть только веса рук обоих игроков в узле после path (hero_* игнорируются).
+///
+/// Возвращает (действия героя: (тип, сумма, частота, EV), эквити героя, веса рук оппонента,
+/// веса рук игрока 0 в узле, веса рук игрока 1 в узле).
 #[pyfunction]
-#[pyo3(signature = (hands0, hands1, river_cards, strengths0, strengths1, pot, stack, sizes, river_sizes,
-                    raise_mult, river_raise, extra_bet, oop_can_lead, iterations, hero_player, hero_index, path))]
 #[allow(clippy::too_many_arguments)]
 fn solve(
     py: Python<'_>,
     hands0: Vec<(u8, u8)>,
     hands1: Vec<(u8, u8)>,
-    river_cards: Vec<u8>,
+    w0: Vec<f64>,
+    w1: Vec<f64>,
     strengths0: Vec<Vec<u32>>,
     strengths1: Vec<Vec<u32>>,
+    deal_cards: Vec<Vec<u8>>,
+    deal_next: Vec<Vec<i64>>,
+    deal_weight: Vec<f64>,
+    root_next: i64,
     pot: f64,
     stack: f64,
     sizes: Vec<f64>,
-    river_sizes: Vec<f64>,
+    root_raise: bool,
+    deeper_sizes: Vec<Vec<f64>>,
+    deeper_raise: Vec<bool>,
     raise_mult: f64,
-    river_raise: bool,
     extra_bet: f64,
     oop_can_lead: bool,
     iterations: usize,
     hero_player: usize,
     hero_index: usize,
     path: Vec<(u8, f64)>,
-) -> PyResult<(Vec<(u8, f64, f64, f64)>, f64, Vec<f64>)> {
-    let cfg = Cfg { raise_mult, allow_raise: true };
-    let river_cfg = Cfg { raise_mult, allow_raise: river_raise };
-    let is_river = river_cards.len() == 1 && river_cards[0] == 255;
+    want_reach: bool,
+) -> PyResult<Answer> {
     let n = [hands0.len(), hands1.len()];
     let hands = [hands0, hands1];
     let mut same: [Vec<Option<usize>>; 2] = [vec![None; n[0]], vec![None; n[1]]];
@@ -435,110 +490,100 @@ fn solve(
             same[1][j] = Some(i);
         }
     }
-    let mut shows = Vec::with_capacity(river_cards.len());
-    for (ri, &rc) in river_cards.iter().enumerate() {
-        let strength = [strengths0[ri].clone(), strengths1[ri].clone()];
+    let mut shows = Vec::with_capacity(strengths0.len());
+    for (s0, s1) in strengths0.into_iter().zip(strengths1) {
+        let strength = [s0, s1];
         let mut order: [Vec<usize>; 2] = [(0..n[0]).collect(), (0..n[1]).collect()];
-        let mut valid: [Vec<bool>; 2] = [vec![], vec![]];
         for p in 0..2 {
             order[p].sort_by_key(|&h| strength[p][h]);
-            valid[p] = hands[p].iter().map(|&(a, b)| a != rc && b != rc).collect();
         }
-        shows.push(Show { strength, order, valid });
+        shows.push(Show { strength, order });
     }
-    let street = build(pot, stack, &sizes, extra_bet, oop_can_lead, &cfg);
-    let mut street_store = Store::new(&street, n);
-    let mut leaf_of = vec![usize::MAX; street.nodes.len()];
-    let mut river_trees = vec![];
-    let mut river_stores: Vec<Vec<Store>> = vec![];
-    if !is_river {
-        for (id, nd) in street.nodes.iter().enumerate() {
-            if nd.kind == Kind::Close {
-                leaf_of[id] = river_trees.len();
-                let t = build(pot + 2.0 * nd.c[0], (stack - nd.c[0]).max(0.0), &river_sizes, 0.0, true, &river_cfg);
-                river_stores.push((0..river_cards.len()).map(|_| Store::new(&t, n)).collect());
-                river_trees.push(t);
-            }
-        }
-    }
-    // на тёрне у каждой пары рук 44 возможных карты ривера (52 − 4 борда − 4 закрытых)
-    let river_weight = if is_river { 1.0 } else { 1.0 / 44.0 };
-    let s = Ctx { hands, same, shows, stack, street, leaf_of, river_trees, river_weight };
+    let deals: Vec<Deal> = deal_cards
+        .into_iter()
+        .zip(deal_next)
+        .zip(deal_weight)
+        .map(|((cards, next), weight)| Deal { cards, weight, next: next.into_iter().map(to_next).collect() })
+        .collect();
+    let deeper: Vec<StreetCfg> = deeper_sizes.into_iter().zip(deeper_raise).map(|(sizes, allow_raise)| StreetCfg { sizes, allow_raise }).collect();
+    let ctx = Ctx { hands, same, shows, deals, raise_mult };
+    let mut root = ctx.make_street(pot, stack, &sizes, extra_bet, oop_can_lead, root_raise, to_next(root_next), &deeper);
 
-    let ones0 = vec![1.0; n[0]];
-    let ones1 = vec![1.0; n[1]];
     py.allow_threads(|| {
         for it in 1..=iterations {
-            run(&s, is_river, &mut street_store, &mut river_stores, 0, &ones0, &ones1, it);
+            ctx.cfr(&mut root, 0, &w0, &w1, it);
         }
     });
 
-    // идём по сыгранным действиям к узлу героя
-    let mut reach = [ones0, ones1];
+    // идём по сыгранным действиям к нужному узлу
+    let mut reach = [w0, w1];
     let mut node = 0usize;
     for (kind, amount) in path {
-        let nd = s.street.nodes[node].clone();
-        let idx = if kind == CHECK {
-            0
-        } else {
-            let mut best = usize::MAX;
-            let mut dist = f64::MAX;
-            for (i, &(k, a)) in nd.acts.iter().enumerate() {
-                if (k == BET || k == RAISE || k == ALLIN) && (a - amount).abs() < dist {
-                    dist = (a - amount).abs();
-                    best = i;
-                }
-            }
-            if best == usize::MAX {
-                return Err(pyo3::exceptions::PyValueError::new_err("в дереве нет такой ставки"));
-            }
-            best
-        };
-        let na = nd.acts.len();
-        let strat = strategy(&street_store, node, n[nd.player], na, true);
-        for h in 0..n[nd.player] {
-            reach[nd.player][h] *= strat[h * na + idx];
+        let nd = root.tree.nodes[node].clone();
+        if nd.kind != Kind::Decision {
+            return Err(pyo3::exceptions::PyValueError::new_err("путь длиннее дерева"));
         }
-        node = nd.children[idx];
+        let want = match kind {
+            0 => FOLD,
+            1 => CHECK,
+            2 => CALL,
+            _ => BET,
+        };
+        let mut best = usize::MAX;
+        let mut dist = f64::MAX;
+        for (i, &(k, a)) in nd.acts.iter().enumerate() {
+            let d = if want == BET {
+                if k == BET || k == RAISE || k == ALLIN { (a - amount).abs() } else { f64::MAX }
+            } else if k == want {
+                0.0
+            } else {
+                f64::MAX
+            };
+            if d < dist {
+                dist = d;
+                best = i;
+            }
+        }
+        if best == usize::MAX {
+            return Err(pyo3::exceptions::PyValueError::new_err("в дереве нет такого действия"));
+        }
+        let na = nd.acts.len();
+        let strat = strategy(&root.store, node, n[nd.player], na, true);
+        for h in 0..n[nd.player] {
+            reach[nd.player][h] *= strat[h * na + best];
+        }
+        node = nd.children[best];
     }
-    let nd = s.street.nodes[node].clone();
+    if want_reach {
+        let [a, b] = reach;
+        return Ok((vec![], 0.0, vec![], a, b));
+    }
+    let nd = root.tree.nodes[node].clone();
     if nd.kind != Kind::Decision || nd.player != hero_player {
         return Err(pyo3::exceptions::PyValueError::new_err("путь не приводит к ходу героя"));
     }
     let na = nd.acts.len();
-    let strat = strategy(&street_store, node, n[hero_player], na, true);
+    let strat = strategy(&root.store, node, n[hero_player], na, true);
     let opp = 1 - hero_player;
-    let comp = s.compat(hero_player, &reach[opp]);
+    let comp = ctx.compat(hero_player, &reach[opp]);
     let norm = if comp[hero_index] > 0.0 { comp[hero_index] } else { 1.0 };
     let mut actions = vec![];
     for (a, &ch) in nd.children.iter().enumerate() {
-        // герой играет действие `a` со всеми руками — ценность считается для каждой руки отдельно
         let (r0, r1) = (reach[0].clone(), reach[1].clone());
-        let (u0, u1) = run(&s, is_river, &mut street_store, &mut river_stores, ch, &r0, &r1, 0);
+        let (u0, u1) = ctx.cfr(&mut root, ch, &r0, &r1, 0);
         let u = if hero_player == 0 { u0 } else { u1 };
         actions.push((nd.acts[a].0, nd.acts[a].1, strat[hero_index * na + a], u[hero_index] / norm));
     }
-    // эквити героя против рук, с которыми оппонент дошёл до этой точки
-    let (mut num, mut den) = (0.0, 0.0);
-    for ri in 0..s.shows.len() {
-        if !s.shows[ri].valid[hero_player][hero_index] {
-            continue;
-        }
-        let q: Vec<f64> = reach[opp].iter().zip(&s.shows[ri].valid[opp]).map(|(r, v)| if *v { *r } else { 0.0 }).collect();
-        let m = s.compat(hero_player, &q);
-        let (win, lose) = s.win_lose(hero_player, &s.shows[ri], &q);
-        let (w, l, c) = (win[hero_index], lose[hero_index], m[hero_index]);
-        num += w + 0.5 * (c - w - l);
-        den += c;
-    }
+    let (num, den) = ctx.equity(root.after, hero_player, hero_index, &reach[opp]);
     let equity = if den > 0.0 { num / den } else { 0.0 };
-    let (ha, hb) = s.hands[hero_player][hero_index];
-    let weights: Vec<f64> = s.hands[opp]
+    let hero_hand = ctx.hands[hero_player][hero_index];
+    let weights: Vec<f64> = ctx.hands[opp]
         .iter()
         .zip(&reach[opp])
-        .map(|(&(a, b), r)| if a == ha || a == hb || b == ha || b == hb { 0.0 } else { *r })
+        .map(|(&h, r)| if has(h, hero_hand.0) || has(h, hero_hand.1) { 0.0 } else { *r })
         .collect();
-    Ok((actions, equity, weights))
+    let [a, b] = reach;
+    Ok((actions, equity, weights, a, b))
 }
 
 #[pymodule]

@@ -129,6 +129,7 @@ class Game:
         self.voluntary: set[int] = set()          # кто уже добровольно вкладывал деньги
         self.seen_pre: set[int] = set()           # чьё первое префлоп-решение уже записано в профиль
         self.history: list[tuple[str, int, str]] = []     # (улица, игрок, действие) на постфлопе
+        self.history_amounts: list[float] = []            # до какой суммы ставка или рейз (0 для чека и колла)
         self.pending = self._order()              # кому ещё ходить на этой улице
         self.finished, self.result, self.net, self.final_pot = False, "", 0.0, 0.0
         self.shown: set[int] = set()
@@ -198,9 +199,10 @@ class Game:
         extras = [j for j in self.alive() if j not in (i, v)]
         names = {i: "hero", v: "villain", **{j: f"v{k}" for k, j in enumerate(extras, start=2)}}
         hist = [(st, names[w], k) for st, w, k in self.history if w in names]
+        amts = [a for (st, w, k), a in zip(self.history, self.history_amounts) if w in names]
         return GameState(
             **common, villain_pos=model_pos(self.players[v].pos), preflop_line=self._relation(i, v),
-            hero_invested=p.inv, history=hist, in_position_override=self._ip(i, v),
+            hero_invested=p.inv, history=hist, history_amounts=amts, in_position_override=self._ip(i, v),
             extra_villains=[(model_pos(self.players[j].pos), self._relation(i, j)) for j in extras],
             villain_adj=self._adjust_for(i, v))
 
@@ -349,6 +351,7 @@ class Game:
             self.log.append(f"{tag} — чек.")
             if not pre:
                 self.history.append((self.street, i, "check"))
+                self.history_amounts.append(0.0)
             return
         if kind == "call":
             pay = min(self.cur - p.inv, p.stack)
@@ -359,6 +362,7 @@ class Game:
                 self.voluntary.add(i)
             else:
                 self.history.append((self.street, i, "call"))
+                self.history_amounts.append(0.0)
             return
         to = min(to, p.inv + p.stack)
         first_bet = not pre and self.cur == 0
@@ -373,6 +377,7 @@ class Game:
             self.voluntary.add(i)
         else:
             self.history.append((self.street, i, "bet" if first_bet else "raise"))
+            self.history_amounts.append(to)
         order = self._order()                    # после рейза снова ходят все остальные, начиная со следующего
         k = next((n for n, j in enumerate(order) if self._after(j, i)), 0)
         self.pending = [j for j in order[k:] + order[:k] if j != i]

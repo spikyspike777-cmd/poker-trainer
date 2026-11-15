@@ -2,7 +2,7 @@ import random
 
 import pytest
 
-from poker_coach import coach
+from poker_coach import coach, params
 from poker_coach.engine import Game, H
 
 
@@ -10,6 +10,8 @@ from poker_coach.engine import Game, H
 def fast_solver(monkeypatch):
     monkeypatch.setattr(coach.SOLVER, "iterations", 20)
     monkeypatch.setattr(coach.SOLVER, "turn_iterations", 15, raising=False)
+    monkeypatch.setattr(coach.SOLVER, "flop_iterations", 10, raising=False)
+    monkeypatch.setitem(params.P, "solved_ranges", 0)       # цепочка решений слишком медленная для тестов
 
 
 @pytest.mark.parametrize("n", [2, 3, 6, 9])

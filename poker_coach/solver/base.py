@@ -27,6 +27,8 @@ class Spot:
     hero_in_position: bool
     facing_bet: float = 0.0
     oop_can_lead: bool = True      # может ли игрок без позиции поставить первым (False — «чек в агрессора»)
+    hero_weights: list[float] | None = None      # веса рук в диапазонах (None — все равны)
+    villain_weights: list[float] | None = None
 
 
 @dataclass

@@ -72,6 +72,7 @@ def _start(state: GameState):
 
 
 _STREET_CARDS = {"flop": 3, "turn": 4, "river": 5}
+STREETS_ORDER = ["flop", "turn", "river"]
 def narrow(combos, board, kind: str, in_position: bool, bluff_scale: float = 1.0):
     """Сузить диапазон после одного действия игрока на борде `board` (эвристика)."""
     if len(combos) < 4:
@@ -174,3 +175,69 @@ def matrix(vr: VillainRange | None) -> dict[str, float]:
         cnt[k] = cnt.get(k, 0.0) + w / top
     full = lambda k: 6 if len(k) == 2 else (4 if k[2] == "s" else 12)
     return {k: min(1.0, n / full(k)) for k, n in cnt.items() if n / full(k) > 0.02}
+
+
+def solved_ranges(state: GameState, solver):
+    """Диапазоны на начало текущей улицы из решения прошлых улиц солвером, а не из правил сужения.
+
+    Прошлые улицы решаются по очереди (флоп, затем тёрн); после каждой берутся веса рук, с которыми
+    равновесная стратегия играет именно ту линию, что была сыграна. -> (руки героя, веса, руки оппонента, веса)
+    или None, если так посчитать нельзя (нет сумм ставок, мультивей, линии нет в дереве солвера).
+    """
+    hist, amts = state.history, state.history_amounts
+    past = [s for s in ("flop", "turn") if s != state.street and STREETS_ORDER.index(s) < STREETS_ORDER.index(state.street)]
+    if not past or len(amts) != len(hist) or state.extra_villains or not hasattr(solver, "reach_after"):
+        return None
+    start_h = start_range(state.preflop_line, state.hero_pos, state.villain_pos)
+    start_v = _start(state)
+    if start_h is None or start_v is None:
+        return None
+    # сколько каждый вложил на каждой улице
+    inv = {s: {"hero": 0.0, "villain": 0.0} for s in STREETS_ORDER}
+    for (street, actor, kind), amount in zip(hist, amts):
+        if actor not in ("hero", "villain"):
+            return None
+        if kind in ("bet", "raise"):
+            inv[street][actor] = amount
+        elif kind == "call":
+            inv[street][actor] = max(inv[street].values())
+    spent = {a: sum(inv[s][a] for s in past) for a in ("hero", "villain")}
+    cur_hero, cur_vil = state.hero_invested, state.hero_invested + state.to_call
+    pot = state.pot - spent["hero"] - spent["villain"] - cur_hero - cur_vil
+    stack = state.stack + spent["hero"] + cur_hero
+    if pot <= 0:
+        return None
+    board = to_eval7(state.board)
+    hero_ip = state.in_position
+    combos = {"hero": list(start_h[0]), "villain": charts.scale_range(start_v[0], _scales(state)[0])}
+    weights = {a: [1.0] * len(combos[a]) for a in combos}
+    oop, ip = ("villain", "hero") if hero_ip else ("hero", "villain")
+    for street in past:
+        b = board[:_STREET_CARDS[street]]
+        for a in combos:                                   # убираем руки, которые бьются с бордом
+            keep = [i for i, c in enumerate(combos[a]) if c[0] not in b and c[1] not in b and weights[a][i] > 1e-4]
+            combos[a], weights[a] = [combos[a][i] for i in keep], [weights[a][i] for i in keep]
+        acts = [(actor, kind, amount) for (st, actor, kind), amount in zip(hist, amts) if st == street]
+        if not acts or min(len(combos["hero"]), len(combos["villain"])) < 2:
+            return None
+        path = [(1, 0.0) if k == "check" else (2, 0.0) if k == "call" else (3, amount) for _a, k, amount in acts]
+        lead = acts[0][1] in ("bet", "raise") or acts[0][0] != oop
+        try:
+            r_oop, r_ip = solver.reach_after(b, combos[oop], combos[ip], weights[oop], weights[ip], pot, stack, path, lead)
+        except ValueError:
+            return None                                    # сыгранной линии нет в дереве солвера
+        for a, r in ((oop, r_oop), (ip, r_ip)):
+            top = max(r, default=0.0)
+            if top < 1e-6:
+                return None                                # солвер так не играет никогда — диапазон не определён
+            weights[a] = [x / top for x in r]
+        c = max(inv[street].values())
+        pot, stack = pot + 2 * c, stack - c
+    dead = {"hero": set(board), "villain": set(board) | set(to_eval7(state.hero_cards))}
+    out = []
+    for a in ("hero", "villain"):
+        keep = [i for i, c in enumerate(combos[a]) if c[0] not in dead[a] and c[1] not in dead[a] and weights[a][i] > 1e-3]
+        if len(keep) < 2:
+            return None
+        out += [[combos[a][i] for i in keep], [weights[a][i] for i in keep]]
+    return tuple(out)

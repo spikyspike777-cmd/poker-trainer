@@ -78,6 +78,9 @@ class GameState(BaseModel):
         default_factory=list,
         description="Постфлоп-действия по порядку: (улица flop/turn/river, hero/villain, check/bet/raise/call)")
 
+    history_amounts: list[float] = Field(
+        default_factory=list,
+        description="Параллельно history: до какой суммы на улице была ставка или рейз (0 для чека и колла)")
     extra_villains: list[tuple[str, PreflopLine]] = Field(
         default_factory=list,
         description="Остальные оппоненты в банке (кроме основного): позиция и префлоп-линия относительно героя. "

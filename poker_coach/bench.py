@@ -25,6 +25,8 @@ DATA = Path(__file__).resolve().parent.parent / "data" / "pokerbench"
 URL = "https://huggingface.co/datasets/RZ412/PokerBench/resolve/main/"
 USE_HISTORY = True
 CHART_RANGES = False
+SOLVED = False
+NO_FLOP = False
 PRE = "preflop_1k_test_set_game_scenario_information.csv"
 POST = "postflop_10k_test_set_game_scenario_information.csv"
 
@@ -75,6 +77,7 @@ def postflop_state(row: dict) -> GameState:
         board += _cards(row["board_river"])
     me = row["hero_position"]
     spent, inv, history, st = raises[-1][1], {"IP": 0.0, "OOP": 0.0}, [], "flop"
+    amounts: list[float] = []
     for tok in row["postflop_action"].split("/"):
         if tok == "dealcards":
             spent += inv[me]
@@ -85,11 +88,13 @@ def postflop_state(row: dict) -> GameState:
         if len(parts) < 2 or parts[0] not in inv:
             continue                                   # карта после dealcards
         who, kind = parts[0], parts[1].lower()
+        amount = 0.0
         if kind in ("bet", "raise"):
-            inv[who] = float(parts[2])
+            inv[who] = amount = float(parts[2])
         elif kind == "call":
             inv[who] = max(inv.values())
         history.append((st, "hero" if who == me else "villain", kind))
+        amounts.append(amount)
     opp = "OOP" if me == "IP" else "IP"
     to_call = max(0.0, inv[opp] - inv[me])
     stack = max(100 - spent - inv[me], to_call, 0.5)
@@ -98,6 +103,7 @@ def postflop_state(row: dict) -> GameState:
               preflop_line=line, pot=pot, to_call=to_call, stack=stack, hero_invested=inv[me])
     if USE_HISTORY:
         kw["history"] = history
+        kw["history_amounts"] = amounts
     return GameState(**kw)
 
 
@@ -127,9 +133,12 @@ def postflop_predict(row: dict) -> tuple[str, str]:
 
 
 def _post_job(args):
-    row, use_solver, use_history, chart_ranges = args
+    row, use_solver, use_history, chart_ranges, solved, no_flop = args
     from .params import P
     P["table_ranges"] = 0 if chart_ranges else P["table_ranges"]
+    P["solved_ranges"] = 1 if solved else 0
+    if no_flop and coach.SOLVER is not None and hasattr(coach.SOLVER, "solve_flop"):
+        coach.SOLVER.solve_flop = False
     global USE_HISTORY
     USE_HISTORY = use_history
     if not use_solver:
@@ -149,7 +158,7 @@ def run_postflop(n: int, use_solver: bool, seed: int = 0, procs: int = 4):
     if n and n < len(rows):
         rows = random.Random(seed).sample(rows, n)
     with Pool(procs) as pool:
-        res = pool.map(_post_job, [(r, use_solver, USE_HISTORY, CHART_RANGES) for r in rows], chunksize=8)
+        res = pool.map(_post_job, [(r, use_solver, USE_HISTORY, CHART_RANGES, SOLVED, NO_FLOP) for r in rows], chunksize=8)
     return res
 
 
@@ -257,6 +266,8 @@ def main() -> None:
     p.add_argument("--n", type=int, default=2000, help="размер выборки постфлопа, 0 — все 10k")
     p.add_argument("--no-solver", action="store_true")
     p.add_argument("--no-history", action="store_true", help="не сужать диапазоны по истории ставок")
+    p.add_argument("--solved-ranges", action="store_true", help="диапазоны из решения прошлых улиц солвером")
+    p.add_argument("--no-flop", action="store_true", help="флоп — эвристикой")
     p.add_argument("--chart-ranges", action="store_true", help="диапазоны только по ручным чартам")
     p.add_argument("--no-table", action="store_true", help="префлоп только по ручным чартам")
     p.add_argument("--skip-postflop", action="store_true")
@@ -268,8 +279,8 @@ def main() -> None:
     if coach.SOLVER is not None:
         coach.SOLVER.iterations = a.iterations
     coach.USE_GTO_TABLE = not a.no_table
-    global CHART_RANGES
-    CHART_RANGES = a.chart_ranges
+    global CHART_RANGES, SOLVED, NO_FLOP
+    CHART_RANGES, SOLVED, NO_FLOP = a.chart_ranges, a.solved_ranges, a.no_flop
     pre = [] if a.skip_preflop else run_preflop()
     post = [] if a.skip_postflop else run_postflop(a.n, not a.no_solver)
     print(report(pre, post))

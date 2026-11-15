@@ -49,8 +49,6 @@ def test_coach_uses_solver_on_river_and_turn():
         assert turn.mix and "Rust" in turn.source and abs(sum(m[2] for m in turn.mix) - 1) < 1e-4
     else:
         assert not turn.mix and "эвристика" in turn.source
-    flop = analyze(GameState(board="Kh 7h 2c", pot=20, to_call=8, **kw))
-    assert not flop.mix and "эвристика" in flop.source
 
 
 @pytest.mark.skipif(not RustCFR.available(), reason="расширение solver_rs не собрано")
@@ -75,3 +73,26 @@ def test_rust_turn_is_sane():
     assert solve(["7d", "7s"])["fold"].freq < 0.01            # сет не сбрасывает
     air = solve(["6d", "5d"])
     assert air["call"].freq < 0.05 and abs(air["fold"].ev) < 1e-9
+
+
+@pytest.mark.skipif(not RustCFR.available(), reason="расширение solver_rs не собрано")
+def test_flop_solver_and_solved_ranges():
+    from poker_coach import coach, ranges
+    kw = dict(hero_cards="As 7s", hero_pos="BB", villain_pos="BTN", preflop_line="villain_open_hero_call")
+    flop = analyze(GameState(board="Kh 7h 2c", pot=8.5, to_call=3, stack=94.5, **kw))
+    assert flop.mix and "Rust" in flop.source
+    river = GameState(board="Kh 7h 2c 9s 3d", pot=29.5, to_call=9, stack=82.5, **kw,
+                      history=[("flop", "hero", "check"), ("flop", "villain", "bet"), ("flop", "hero", "call"),
+                               ("turn", "hero", "check"), ("turn", "villain", "bet"), ("turn", "hero", "call"),
+                               ("river", "hero", "check"), ("river", "villain", "bet")],
+                      history_amounts=[0, 3, 0, 0, 6, 0, 0, 9])
+    got = ranges.solved_ranges(river, coach.SOLVER)
+    assert got is not None
+    h, hw, v, vw = got
+    assert len(h) == len(hw) and len(v) == len(vw) and max(vw) == pytest.approx(1.0) and min(vw) > 0
+    board = set(to_eval7(river.board))
+    assert all(not (set(c) & board) for c in h + v)
+    a = analyze(river)
+    assert "из решения солвером прошлых улиц" in a.source
+    # без сумм ставок цепочку построить нельзя — остаются правила
+    assert ranges.solved_ranges(river.model_copy(update={"history_amounts": []}), coach.SOLVER) is None

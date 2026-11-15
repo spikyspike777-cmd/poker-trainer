@@ -86,4 +86,4 @@ def test_postflop_advice():
     assert a.action == "fold" and a.equity < a.required
     a = analyze(gs(hero_cards="Ah Qh", board="Kh 7h 2c", pot=8.5, to_call=3, stack=94.5,
                    hero_pos="BB", villain_pos="BTN", preflop_line="villain_open_hero_call"))
-    assert a.action == "call" and a.villain.narrowed
+    assert a.action in ("call", "raise") and a.villain.narrowed          # натсовое флеш-дро не сбрасывают

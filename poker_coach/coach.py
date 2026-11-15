@@ -381,15 +381,24 @@ def _oop_can_lead(s: GameState) -> bool:
         return True                            # оппонент без позиции уже поставил первым
     oop = "villain" if s.in_position else "hero"
     last = [who for st, who, k in s.history if st != s.street and k in ("bet", "raise")]
-    return not last or last[-1] == oop
+    if not last:                               # на постфлопе ещё никто не ставил — агрессор тот, кто рейзил на префлопе
+        hero_raised = s.preflop_line in (L.HERO_OPEN_VILLAIN_CALL, L.HERO_3BET_VILLAIN_CALL)
+        return ("hero" if hero_raised else "villain") == oop or bool(
+            [1 for st, _w, _k in s.history if st != s.street])     # после улицы без ставок лид возможен
+    return last[-1] == oop
 
 
 def _solve(s: GameState, a: Analysis, hero, board) -> None:
     """Если солвер умеет этот спот — заменить эвристический совет равновесной стратегией."""
     pot0 = s.pot - s.to_call                         # банк до ставки оппонента
-    spot = Spot(hero=tuple(hero), board=board, hero_range=ranges.hero_range(s),
-                villain_range=ranges.villain_start(s), pot=pot0, stack=s.stack,
-                hero_in_position=s.in_position, facing_bet=s.to_call, oop_can_lead=_oop_can_lead(s))
+    solved = ranges.solved_ranges(s, SOLVER) if P["solved_ranges"] else None
+    if solved:
+        h_range, h_w, v_range, v_w = solved
+    else:
+        h_range, h_w, v_range, v_w = ranges.hero_range(s), None, ranges.villain_start(s), None
+    spot = Spot(hero=tuple(hero), board=board, hero_range=h_range, villain_range=v_range, pot=pot0, stack=s.stack,
+                hero_in_position=s.in_position, facing_bet=s.to_call, oop_can_lead=_oop_can_lead(s),
+                hero_weights=h_w, villain_weights=v_w)
     if not SOLVER.supports(spot) or not spot.villain_range:
         return
     res = SOLVER.solve(spot)
@@ -423,7 +432,8 @@ def _solve(s: GameState, a: Analysis, hero, board) -> None:
         r.append("Фолд: против его диапазона ставки эта рука выигрывает слишком редко.")
     r.append(f"Вы {'в позиции' if s.in_position else 'без позиции'}; SPR (стек к банку) = {a.spr:.1f}.")
     a.reasons = r
-    a.source = f"{res.name}; диапазоны на входе — по префлоп-чартам и ставкам на прошлых улицах"
+    a.source = f"{res.name}; диапазоны на входе — " + (
+        "из решения солвером прошлых улиц" if solved else "по префлоп-чартам и ставкам на прошлых улицах")
 
 
 def explain(a: Analysis) -> str:

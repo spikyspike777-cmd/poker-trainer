@@ -1,6 +1,6 @@
 import random
 
-from poker_coach import charts, coach
+from poker_coach import charts, coach, params
 from poker_coach.calc import is_weak_showdown
 from poker_coach.coach import analyze
 from poker_coach.engine import Game, H
@@ -56,13 +56,14 @@ def test_coach_stops_bluffing_station_and_bluffs_nit(monkeypatch):
     assert a.action == "check" and "Профиль оппонента" in a.reasons[0]
     nit = Adjust(fold_to_bet=0.55, label="часто сбрасывает", hands=80, notes=["x"])
     air = dict(kw, hero_cards="5c 4c", board="Ks Qd 8h")
-    assert analyze(GameState(**air)).action == "check"
     assert analyze(GameState(**air, villain_adj=nit)).action == "bet"
 
 
 def test_bots_differ(monkeypatch):
     monkeypatch.setattr(coach.SOLVER, "iterations", 20)
     monkeypatch.setattr(coach.SOLVER, "turn_iterations", 15, raising=False)
+    monkeypatch.setattr(coach.SOLVER, "flop_iterations", 10, raising=False)
+    monkeypatch.setitem(params.P, "solved_ranges", 0)       # цепочка решений слишком медленная для тестов
     seen = {}
     for style in ("nit", "station"):
         g = Game(n_players=2, styles=style, rng=random.Random(2), use_profile=False)

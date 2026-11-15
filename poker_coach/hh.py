@@ -88,6 +88,7 @@ def parse_hand(text: str, profiles: dict[str, PlayerStats] | None = None) -> Han
     pre_raises: list[str] = []                    # кто рейзил на префлопе, по порядку
     pre_callers: list[str] = []                   # коллы и лимпы на префлопе
     history: list[tuple[str, str, str]] = []
+    amounts: list[float] = []                     # параллельно history: сумма ставки или рейза
     collected = 0.0
     events: list[tuple[str, str, str, bool]] = []       # (игрок, улица, действие, отвечал ли на ставку)
     shown: dict[str, list[str]] = {}
@@ -137,7 +138,8 @@ def parse_hand(text: str, profiles: dict[str, PlayerStats] | None = None) -> Han
         if who == hero:
             review.decisions.append(_review(
                 street, kind, verb, amount, to, hero, pos, board, pot, inv, stacks, active,
-                pre_raises, pre_callers, history, review.hero_cards, profiles, "/".join(pre_tokens)))
+                pre_raises, pre_callers, list(zip(history, amounts)), review.hero_cards, profiles,
+                "/".join(pre_tokens)))
         else:
             events.append((who, street, {"bets": "bet", "raises": "raise", "calls": "call",
                                          "checks": "check", "folds": "fold"}[verb], max(inv.values()) > inv[who]))
@@ -165,6 +167,7 @@ def parse_hand(text: str, profiles: dict[str, PlayerStats] | None = None) -> Han
                 pre_callers.clear()
         if street != "preflop" and verb != "folds":
             history.append((street, who, {"bets": "bet", "raises": "raise", "calls": "call", "checks": "check"}[verb]))
+            amounts.append(amount if verb == "bets" else to if verb == "raises" else 0.0)
     review.board = board
     for name in stacks:
         if name == hero:
@@ -227,7 +230,8 @@ def _review(street, kind, verb, amount, to, hero, pos, board, pot, inv, stacks, 
             preflop_line=line, pot=round(pot, 2), to_call=round(min(to_call, stacks[hero]), 2),
             stack=round(stacks[hero], 2), hero_invested=0 if pre else round(inv[hero], 2),
             preflop_actions=pre_line if pre else None,
-            history=[(st, "hero" if w == hero else "villain", k) for st, w, k in history],
+            history=[(st, "hero" if w == hero else "villain", k) for (st, w, k), _a in history],
+            history_amounts=[a for _h, a in history],
             villain_adj=profiles[villain].adjust() if villain in profiles else None)
         d.advice = analyze(d.state)
         d.matched = matches(d.advice, kind)
