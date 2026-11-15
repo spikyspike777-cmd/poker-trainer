@@ -62,8 +62,20 @@ def matches(a: Analysis, kind: str) -> bool:
     return _group(kind) == _group(a.action)
 
 
-def analyze(state: GameState, use_table: bool = True) -> Analysis:
-    """use_table=False — префлоп только по ручным чартам (так играют боты)."""
+def analyze(state: GameState, use_table: bool = True, fast: bool = False) -> Analysis:
+    """Совет для ситуации.
+
+    use_table=False — префлоп только по ручным чартам.
+    fast=True — без цепочки решений прошлых улиц и с узкими диапазонами из чартов: в несколько раз
+    быстрее и немного менее точно. Так считаются ходы ботов, чтобы стол не замирал.
+    """
+    if fast:
+        saved = {k: P[k] for k in ("solved_ranges", "table_ranges")}
+        P.update(solved_ranges=0, table_ranges=0)
+        try:
+            return analyze(state, use_table)
+        finally:
+            P.update(saved)
     hero, board = to_eval7(state.hero_cards), to_eval7(state.board)
     vr = ranges.villain_range(state)
     a = Analysis(action="fold", villain=vr, spr=calc.spr(state.stack, state.pot),

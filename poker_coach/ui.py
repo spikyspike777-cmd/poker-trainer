@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QMainWindow, QPushButton, QRadioButton,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QPushButton, QRadioButton,
     QTabWidget, QTextBrowser, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -44,6 +44,40 @@ QTabBar::tab:selected { background: #17212b; border-bottom: 2px solid #4caf50; }
 def card_html(card: str, size: int = 22) -> str:
     return (f'<span style="background:#f5f5f5; color:{SUIT_COLOR[card[1]]}; font-size:{size}px; '
             f'font-weight:bold;">&nbsp;{card[0]}{SUIT_SYM[card[1]]}&nbsp;</span>')
+
+
+_ACTION_WORDS = {"x": "check", "ч": "check", "чек": "check", "c": "call", "к": "call", "колл": "call"}
+
+
+def parse_actions(text: str, board_cards: int, hero_ip: bool):
+    """'x b3 c | x b6 c | x b9' -> (history, суммы, сколько герой вложил на текущей улице).
+
+    Улицы разделяются «|», на каждой первым ходит игрок без позиции.
+    """
+    streets = ["flop", "turn", "river"][:max(board_cards - 2, 0)]
+    parts = [p.strip() for p in text.replace(";", "|").split("|")]
+    if len(parts) != len(streets):
+        raise ValueError(f"Борд открыт до улицы «{streets[-1] if streets else 'префлоп'}»: нужно описать "
+                         f"улиц — {len(streets)}, а в строке ставок их {len(parts)}")
+    history, amounts, hero_inv = [], [], 0.0
+    oop, ip = ("villain", "hero") if hero_ip else ("hero", "villain")
+    for street, part in zip(streets, parts):
+        inv = {"hero": 0.0, "villain": 0.0}
+        for i, tok in enumerate(part.replace("/", " ").replace(",", " ").lower().split()):
+            actor = oop if i % 2 == 0 else ip
+            if tok in _ACTION_WORDS:
+                kind, amount = _ACTION_WORDS[tok], 0.0
+                if kind == "call":
+                    inv[actor] = max(inv.values())
+            elif tok[0] in "brбр" and tok[1:].replace(".", "", 1).isdigit():
+                kind = "bet" if tok[0] in "bб" else "raise"
+                amount = inv[actor] = float(tok[1:])
+            else:
+                raise ValueError(f"Не понимаю действие «{tok}». Примеры: x, c, b3, r9")
+            history.append((street, actor, kind))
+            amounts.append(amount)
+        hero_inv = inv["hero"]
+    return history, amounts, hero_inv
 
 
 class CardPicker(QGroupBox):
@@ -208,7 +242,13 @@ class TrainerTab(QWidget):
         form.addRow("Банк сейчас, bb", self.pot)
         form.addRow("Нужно доставить, bb", self.to_call)
         form.addRow("Мой стек, bb", self.stack)
-        hint = QLabel("Банк — вместе со ставкой оппонента. Если оппонент чекнул, «доставить» = 0.")
+        self.actions_edit = QLineEdit()
+        self.actions_edit.setPlaceholderText("x b3 c | x b6 c | x b9")
+        form.addRow("Ставки на постфлопе", self.actions_edit)
+        hint = QLabel("Банк — вместе со ставкой оппонента. Если оппонент чекнул, «доставить» = 0. "
+                      "Ставки (необязательно): улицы через «|», первым ходит игрок без позиции; "
+                      "x — чек, c — колл, b3 — бет 3 bb, r9 — рейз до 9 bb. С ними тренер восстанавливает "
+                      "диапазоны по всей раздаче.")
         hint.setStyleSheet("color:#8fa3b8; font-size:11px;")
         hint.setWordWrap(True)
         form.addRow(hint)
@@ -294,10 +334,16 @@ class TrainerTab(QWidget):
 
     def state(self) -> GameState:
         line = self.line.currentData()
-        return GameState(
+        base = dict(
             hero_cards=self.picker.hero, board=self.picker.board, hero_pos=self.hero_pos.currentText(),
             villain_pos=None if line == PreflopLine.UNOPENED else self.vil_pos.currentText(),
             preflop_line=line, pot=self.pot.value(), to_call=self.to_call.value(), stack=self.stack.value())
+        text = self.actions_edit.text().strip()
+        if not text:
+            return GameState(**base)
+        hero_ip = GameState(**base).in_position
+        history, amounts, hero_inv = parse_actions(text, len(self.picker.board), hero_ip)
+        return GameState(**base, history=history, history_amounts=amounts, hero_invested=hero_inv)
 
     def set_state(self, s: GameState) -> None:
         self.picker.set_cards(s.hero_cards, s.board)
@@ -308,6 +354,7 @@ class TrainerTab(QWidget):
         self.pot.setValue(s.pot)
         self.to_call.setValue(s.to_call)
         self.stack.setValue(s.stack)
+        self.actions_edit.clear()
         self.reset_result()
 
     def load_random(self) -> None:

@@ -41,7 +41,7 @@ struct Tree {
 #[derive(Clone, Copy)]
 struct Cfg {
     raise_mult: f64,
-    allow_raise: bool,
+    max_raises: u8, // сколько рейзов подряд разрешено на улице (0 — без рейзов)
 }
 
 fn bets(pot: f64, stack: f64, sizes: &[f64], extra: f64) -> Vec<f64> {
@@ -64,21 +64,21 @@ fn push(t: &mut Tree, kind: Kind, player: usize, c: [f64; 2]) -> usize {
     t.nodes.len() - 1
 }
 
-fn facing(t: &mut Tree, player: usize, c: [f64; 2], raised: bool, stack: f64, cfg: &Cfg) -> usize {
+fn facing(t: &mut Tree, player: usize, c: [f64; 2], raises: u8, stack: f64, cfg: &Cfg) -> usize {
     let id = push(t, Kind::Decision, player, c);
     let (me, opp) = (c[player], c[1 - player]);
     let mut acts = vec![(FOLD, me), (CALL, opp)];
     let f = push(t, Kind::Fold, player, c);
     let s = push(t, Kind::Close, 0, [opp, opp]);
     let mut children = vec![f, s];
-    if cfg.allow_raise && !raised && opp < stack - 1e-9 {
+    if raises < cfg.max_raises && opp < stack - 1e-9 {
         let mut to = (opp * cfg.raise_mult).min(stack);
         if to > 0.6 * stack {
             to = stack;
         }
         let mut nc = c;
         nc[player] = to;
-        let ch = facing(t, 1 - player, nc, true, stack, cfg);
+        let ch = facing(t, 1 - player, nc, raises + 1, stack, cfg);
         acts.push((if to >= stack - 1e-9 { ALLIN } else { RAISE }, to));
         children.push(ch);
     }
@@ -100,7 +100,7 @@ fn opening(t: &mut Tree, player: usize, stack: f64, sizes: &[f64], extra: f64, l
         for b in bets(t.pot, stack, sizes, extra) {
             let mut c = [0.0, 0.0];
             c[player] = b;
-            let ch = facing(t, 1 - player, c, false, stack, cfg);
+            let ch = facing(t, 1 - player, c, 0, stack, cfg);
             acts.push((if b >= stack - 1e-9 { ALLIN } else { BET }, b));
             children.push(ch);
         }
@@ -158,7 +158,7 @@ struct Deal {
 /// Настройки дерева улицы глубже корня.
 struct StreetCfg {
     sizes: Vec<f64>,
-    allow_raise: bool,
+    max_raises: u8,
 }
 
 /// Экземпляр улицы: дерево, стратегии и вложенные улицы для каждого листа и каждой карты.
@@ -191,10 +191,10 @@ impl Ctx {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn make_street(&self, pot: f64, stack: f64, sizes: &[f64], extra: f64, lead: bool, allow_raise: bool,
+    fn make_street(&self, pot: f64, stack: f64, sizes: &[f64], extra: f64, lead: bool, max_raises: u8,
                    after: Next, deeper: &[StreetCfg]) -> Street {
         let n = [self.n(0), self.n(1)];
-        let tree = build(pot, stack, sizes, extra, lead, &Cfg { raise_mult: self.raise_mult, allow_raise });
+        let tree = build(pot, stack, sizes, extra, lead, &Cfg { raise_mult: self.raise_mult, max_raises });
         let store = Store::new(&tree, n);
         let mut leaf_of = vec![usize::MAX; tree.nodes.len()];
         let mut kids = vec![];
@@ -207,7 +207,7 @@ impl Ctx {
                         .next
                         .iter()
                         .map(|nx| self.make_street(pot + 2.0 * c, (stack - c).max(0.0), &deeper[0].sizes, 0.0, true,
-                                                   deeper[0].allow_raise, *nx, &deeper[1..]))
+                                                   deeper[0].max_raises, *nx, &deeper[1..]))
                         .collect();
                     kids.push(row);
                 }
@@ -446,7 +446,7 @@ type Answer = (Vec<(u8, f64, f64, f64)>, f64, Vec<f64>, Vec<f64>, Vec<f64>);
 /// - strengths*[вскрытие][рука]: силы рук на каждом полном борде;
 /// - deal_*: описание выходов карт; next >= 0 — номер вскрытия, next < 0 — выход карты с номером -next-1;
 /// - root_next: что происходит после торговли на текущей улице (в том же кодировании);
-/// - deeper_sizes / deeper_raise: размеры ставок и разрешение рейза на следующих улицах;
+/// - root_raises, deeper_sizes / deeper_raises: число рейзов подряд и размеры ставок на текущей и следующих улицах;
 /// - path: действия на текущей улице до нужного узла: (тип, сумма), типы 0 фолд, 1 чек, 2 колл, 3 ставка или рейз;
 /// - want_reach: вернуть только веса рук обоих игроков в узле после path (hero_* игнорируются).
 ///
@@ -469,9 +469,9 @@ fn solve(
     pot: f64,
     stack: f64,
     sizes: Vec<f64>,
-    root_raise: bool,
+    root_raises: u8,
     deeper_sizes: Vec<Vec<f64>>,
-    deeper_raise: Vec<bool>,
+    deeper_raises: Vec<u8>,
     raise_mult: f64,
     extra_bet: f64,
     oop_can_lead: bool,
@@ -505,9 +505,9 @@ fn solve(
         .zip(deal_weight)
         .map(|((cards, next), weight)| Deal { cards, weight, next: next.into_iter().map(to_next).collect() })
         .collect();
-    let deeper: Vec<StreetCfg> = deeper_sizes.into_iter().zip(deeper_raise).map(|(sizes, allow_raise)| StreetCfg { sizes, allow_raise }).collect();
+    let deeper: Vec<StreetCfg> = deeper_sizes.into_iter().zip(deeper_raises).map(|(sizes, max_raises)| StreetCfg { sizes, max_raises }).collect();
     let ctx = Ctx { hands, same, shows, deals, raise_mult };
-    let mut root = ctx.make_street(pot, stack, &sizes, extra_bet, oop_can_lead, root_raise, to_next(root_next), &deeper);
+    let mut root = ctx.make_street(pot, stack, &sizes, extra_bet, oop_can_lead, root_raises, to_next(root_next), &deeper);
 
     py.allow_threads(|| {
         for it in 1..=iterations {

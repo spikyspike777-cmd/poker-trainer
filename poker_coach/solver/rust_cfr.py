@@ -31,7 +31,7 @@ class RustCFR:
                  turn_river_raise: bool = False, flop_sizes=(0.5,), flop_turn_sizes=(0.66,),
                  flop_river_sizes=(0.75,), raise_mult: float = 3.0, iterations: int = 300,
                  turn_iterations: int = 120, flop_iterations: int = 80, flop_cards: int = 10,
-                 solve_flop: bool = True):
+                 solve_flop: bool = True, max_raises: int = 1):
         # чем раньше улица, тем проще дерево: иначе считать слишком долго
         self.bet_sizes = bet_sizes                       # ривер
         self.turn_sizes, self.turn_river_sizes, self.turn_river_raise = turn_sizes, turn_river_sizes, turn_river_raise
@@ -40,6 +40,7 @@ class RustCFR:
         self.iterations, self.turn_iterations, self.flop_iterations = iterations, turn_iterations, flop_iterations
         self.flop_cards = flop_cards                     # сколько карт тёрна и ривера перебирать на флопе
         self.solve_flop = solve_flop
+        self.max_raises = max_raises                     # рейзов подряд на текущей улице (2 — можно ответить ре-рейзом; медленнее, прироста точности не дало)
         self._cache: dict = {}
 
     @staticmethod
@@ -83,17 +84,19 @@ class RustCFR:
         strengths = [[[0 if (set(h) & (set(full) - base)) else eval7.evaluate(list(h) + full) for h in r]
                       for full in shows] for r in ranges]
         if n == 5:
-            cfg = (list(self.bet_sizes), True, [], [], self.iterations)
+            cfg = (list(self.bet_sizes), self.max_raises, [], [], self.iterations)
         elif n == 4:
-            cfg = (list(self.turn_sizes), True, [list(self.turn_river_sizes)], [self.turn_river_raise], self.turn_iterations)
+            cfg = (list(self.turn_sizes), self.max_raises, [list(self.turn_river_sizes)],
+                   [1 if self.turn_river_raise else 0], self.turn_iterations)
         else:
-            cfg = (list(self.flop_sizes), True, [list(self.flop_turn_sizes), list(self.flop_river_sizes)],
-                   [False, False], self.flop_iterations)
+            cfg = (list(self.flop_sizes), self.max_raises, [list(self.flop_turn_sizes), list(self.flop_river_sizes)],
+                   [0, 0], self.flop_iterations)
         sizes, root_raise, deeper_sizes, deeper_raise, iters = cfg
         key = (tuple(map(str, board)), tuple(sorted(str(a) + str(b) for a, b in ranges[0])),
                tuple(sorted(str(a) + str(b) for a, b in ranges[1])),
                tuple(round(w, 4) for w in weights[0]), tuple(round(w, 4) for w in weights[1]),
-               round(pot, 2), round(stack, 2), round(extra, 2), lead, hero_p, hero_i, tuple(path), want_reach, iters)
+               round(pot, 2), round(stack, 2), round(extra, 2), lead, hero_p, hero_i, tuple(path), want_reach, iters,
+               tuple(sizes), root_raise, str(deeper_sizes), tuple(deeper_raise))
         if key not in self._cache:
             if len(self._cache) > 200:
                 self._cache.clear()

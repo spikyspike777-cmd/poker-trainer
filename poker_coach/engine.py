@@ -216,7 +216,7 @@ class Game:
 
     def advice(self, i: int = H) -> Analysis:
         st = self.state(i)
-        a = analyze(st)
+        a = analyze(st, fast=i != H)             # ботам — быстрый расчёт, герою — полный
         others = [self.players[j] for j in self.alive() if j != i]
         if st.to_call > 0 and all(o.stack == 0 for o in others):       # все оппоненты в олл-ине: колл или фолд
             if self.street == "preflop" and a.equity is None:
