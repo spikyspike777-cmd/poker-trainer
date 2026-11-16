@@ -4,3 +4,4 @@ __pycache__/
 /data/
 *.whl
 solver_rs/target/
+tools/ref_compare/target/

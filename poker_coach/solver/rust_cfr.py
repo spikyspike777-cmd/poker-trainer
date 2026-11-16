@@ -29,10 +29,11 @@ class RustCFR:
 
     def __init__(self, bet_sizes=(0.33, 0.75), turn_sizes=(0.33, 0.75), turn_river_sizes=(0.75,),
                  turn_river_raise: bool = False, flop_sizes=(0.5,), flop_turn_sizes=(0.66,),
-                 flop_river_sizes=(0.75,), raise_mult: float = 3.0, iterations: int = 300,
-                 turn_iterations: int = 120, flop_iterations: int = 80, flop_cards: int = 10,
+                 flop_river_sizes=(0.75,), raise_mult: float = 3.0, iterations: int = 200,
+                 turn_iterations: int = 70, flop_iterations: int = 45, flop_cards: int = 10,
                  solve_flop: bool = True, max_raises: int = 1):
-        # чем раньше улица, тем проще дерево: иначе считать слишком долго
+        # чем раньше улица, тем проще дерево: иначе считать слишком долго.
+        # Итерация — два прохода по дереву (обновляется то один игрок, то другой).
         self.bet_sizes = bet_sizes                       # ривер
         self.turn_sizes, self.turn_river_sizes, self.turn_river_raise = turn_sizes, turn_river_sizes, turn_river_raise
         self.flop_sizes, self.flop_turn_sizes, self.flop_river_sizes = flop_sizes, flop_turn_sizes, flop_river_sizes
@@ -76,7 +77,8 @@ class RustCFR:
             shows += [board + [t, r] for r in rivers]
         return shows, cards, nexts, weights, -1
 
-    def _run(self, board, ranges, weights, pot, stack, extra, lead, hero_p, hero_i, path, want_reach=False):
+    def _run(self, board, ranges, weights, pot, stack, extra, lead, hero_p, hero_i, path, want_reach=False,
+             want_expl=False, want_all=False):
         board = list(board)
         n = len(board)
         shows, cards, nexts, dweights, root_next = self._layout(board)
@@ -95,7 +97,7 @@ class RustCFR:
         key = (tuple(map(str, board)), tuple(sorted(str(a) + str(b) for a, b in ranges[0])),
                tuple(sorted(str(a) + str(b) for a, b in ranges[1])),
                tuple(round(w, 4) for w in weights[0]), tuple(round(w, 4) for w in weights[1]),
-               round(pot, 2), round(stack, 2), round(extra, 2), lead, hero_p, hero_i, tuple(path), want_reach, iters,
+               round(pot, 2), round(stack, 2), round(extra, 2), lead, hero_p, hero_i, tuple(path), want_reach, want_expl, want_all, iters,
                tuple(sizes), root_raise, str(deeper_sizes), tuple(deeper_raise))
         if key not in self._cache:
             if len(self._cache) > 200:
@@ -105,7 +107,7 @@ class RustCFR:
                 [float(w) for w in weights[0]], [float(w) for w in weights[1]], strengths[0], strengths[1],
                 cards, nexts, dweights, root_next, float(pot), float(stack), sizes, root_raise,
                 deeper_sizes, deeper_raise, self.raise_mult, float(extra), lead, iters, hero_p, hero_i,
-                [(int(k), float(a)) for k, a in path], want_reach)
+                [(int(k), float(a)) for k, a in path], want_reach, want_expl, want_all)
         return self._cache[key]
 
     # ---------- интерфейс ----------
@@ -133,13 +135,23 @@ class RustCFR:
         else:
             path = []
         extra = next((a for k, a in path if k == BET), 0.0)      # первая ставка линии должна быть в дереве
-        acts, equity, w, _r0, _r1 = self._run(spot.board, ranges, weights, spot.pot, spot.stack, extra,
+        acts, equity, w, *_rest = self._run(spot.board, ranges, weights, spot.pot, spot.stack, extra,
                                               spot.oop_can_lead, hero_p, hero_i, path)
         return SolverResult([ActionFreq(_KINDS[k], amt, f, ev) for k, amt, f, ev in acts], equity,
                             ranges[1 - hero_p], list(w), self.name)
 
     def reach_after(self, board, oop, ip, w_oop, w_ip, pot, stack, path, lead=True):
         """Веса рук обоих игроков после того, как на улице сыграна линия `path` (по средней стратегии)."""
-        _a, _e, _w, r0, r1 = self._run(board, [list(oop), list(ip)], [list(w_oop), list(w_ip)], pot, stack,
+        _a, _e, _w, r0, r1, *_rest = self._run(board, [list(oop), list(ip)], [list(w_oop), list(w_ip)], pot, stack,
                                        0.0, lead, 0, 0, path, want_reach=True)
         return list(r0), list(r1)
+
+    def inspect(self, board, oop, ip, w_oop, w_ip, pot, stack, player: int, path=(), lead=True):
+        """Для проверки солвера: стратегия и EV ВСЕХ рук игрока `player` в узле после `path` и эксплуатируемость.
+
+        -> (действия [(тип, сумма)], частоты [действие][рука], EV [действие][рука], эксплуатируемость в bb)
+        """
+        acts, _e, _w, _r0, _r1, expl, freq, ev = self._run(
+            board, [list(oop), list(ip)], [list(w_oop), list(w_ip)], pot, stack, 0.0, lead, player, 0, list(path),
+            want_expl=True, want_all=True)
+        return [(_KINDS[k], amt) for k, amt, _f, _v in acts], freq, ev, expl

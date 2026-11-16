@@ -306,7 +306,8 @@ impl Ctx {
     }
 
     /// Лист улицы, после которого выходит карта: все карты считаются параллельно.
-    fn chance(&self, kids: &mut [Street], d: usize, c: f64, r0: &[f64], r1: &[f64], iter: usize) -> Util {
+    #[allow(clippy::too_many_arguments)]
+    fn chance(&self, kids: &mut [Street], d: usize, c: f64, r0: &[f64], r1: &[f64], iter: usize, upd: usize) -> Util {
         let deal = &self.deals[d];
         let parts: Vec<Util> = kids
             .par_iter_mut()
@@ -315,7 +316,7 @@ impl Ctx {
                 let card = deal.cards[i];
                 let q0: Vec<f64> = r0.iter().zip(&self.hands[0]).map(|(r, h)| if has(*h, card) { 0.0 } else { *r }).collect();
                 let q1: Vec<f64> = r1.iter().zip(&self.hands[1]).map(|(r, h)| if has(*h, card) { 0.0 } else { *r }).collect();
-                let (mut a, mut b) = self.cfr(kid, 0, &q0, &q1, iter);
+                let (mut a, mut b) = self.cfr(kid, 0, &q0, &q1, iter, upd);
                 // полезность следующей улицы считается от её стартового банка; переводим к началу этой
                 let m0 = self.compat(0, &q1);
                 let m1 = self.compat(1, &q0);
@@ -342,7 +343,8 @@ impl Ctx {
     }
 
     /// Один проход CFR+. iter == 0 — только оценка по средней стратегии, без обновления.
-    fn cfr(&self, st: &mut Street, node: usize, r0: &[f64], r1: &[f64], iter: usize) -> Util {
+    /// upd — чьи сожаления обновляем на этом проходе (0 или 1; 2 — обоих).
+    fn cfr(&self, st: &mut Street, node: usize, r0: &[f64], r1: &[f64], iter: usize, upd: usize) -> Util {
         let (kind, player, c, n_acts, children, pot) = {
             let nd = &st.tree.nodes[node];
             (nd.kind, nd.player, nd.c, nd.acts.len(), nd.children.clone(), st.tree.pot)
@@ -354,7 +356,7 @@ impl Ctx {
                     Next::Show(id) => self.showdown(id, pot, c[0], r0, r1),
                     Next::Deal(d) => {
                         let leaf = st.leaf_of[node];
-                        self.chance(&mut st.kids[leaf], d, c[0], r0, r1, iter)
+                        self.chance(&mut st.kids[leaf], d, c[0], r0, r1, iter, upd)
                     }
                 };
             }
@@ -367,7 +369,7 @@ impl Ctx {
         let reach_me = if player == 0 { r0 } else { r1 };
         for (a, &ch) in children.iter().enumerate() {
             let q: Vec<f64> = (0..n_me).map(|h| reach_me[h] * strat[h * n_acts + a]).collect();
-            let (u0, u1) = if player == 0 { self.cfr(st, ch, &q, r1, iter) } else { self.cfr(st, ch, r0, &q, iter) };
+            let (u0, u1) = if player == 0 { self.cfr(st, ch, &q, r1, iter, upd) } else { self.cfr(st, ch, r0, &q, iter, upd) };
             let (mine, theirs) = if player == 0 { (u0, u1) } else { (u1, u0) };
             for (o, t) in other.iter_mut().zip(theirs) {
                 *o += t;
@@ -380,8 +382,8 @@ impl Ctx {
                 mine[h] += strat[h * n_acts + a] * utils[a][h];
             }
         }
-        if iter > 0 {
-            let w = iter as f64;
+        if iter > 0 && (upd == 2 || upd == player) {
+            let w = (iter * iter) as f64; // квадратичное усреднение: поздние итерации важнее
             for h in 0..n_me {
                 for a in 0..n_acts {
                     let i = h * n_acts + a;
@@ -391,6 +393,81 @@ impl Ctx {
             }
         }
         if player == 0 { (mine, other) } else { (other, mine) }
+    }
+
+    /// Лучший ответ игрока `br` на среднюю стратегию оппонента: ценность каждой его руки
+    /// (взвешена достижимостями оппонента, как и в cfr).
+    fn best_response(&self, st: &Street, node: usize, br: usize, r_opp: &[f64]) -> Vec<f64> {
+        let nd = &st.tree.nodes[node];
+        let pot = st.tree.pot;
+        let ones = vec![1.0; self.n(br)];
+        let pick = |u: Util| if br == 0 { u.0 } else { u.1 };
+        let pair = |q: &[f64]| if br == 0 { (ones.clone(), q.to_vec()) } else { (q.to_vec(), ones.clone()) };
+        match nd.kind {
+            Kind::Fold => {
+                let (r0, r1) = pair(r_opp);
+                pick(self.fold(nd.player, pot, nd.c, &r0, &r1))
+            }
+            Kind::Close => match st.after {
+                Next::Show(id) => {
+                    let (r0, r1) = pair(r_opp);
+                    pick(self.showdown(id, pot, nd.c[0], &r0, &r1))
+                }
+                Next::Deal(d) => {
+                    let deal = &self.deals[d];
+                    let c = nd.c[0];
+                    let kids = &st.kids[st.leaf_of[node]];
+                    let parts: Vec<Vec<f64>> = kids
+                        .par_iter()
+                        .enumerate()
+                        .map(|(i, kid)| {
+                            let card = deal.cards[i];
+                            let q: Vec<f64> = r_opp.iter().zip(&self.hands[1 - br]).map(|(r, h)| if has(*h, card) { 0.0 } else { *r }).collect();
+                            let mut v = self.best_response(kid, 0, br, &q);
+                            let m = self.compat(br, &q);
+                            for h in 0..v.len() {
+                                v[h] = if has(self.hands[br][h], card) { 0.0 } else { (v[h] - c * m[h]) * deal.weight };
+                            }
+                            v
+                        })
+                        .collect();
+                    let mut out = vec![0.0; self.n(br)];
+                    for v in parts {
+                        for (x, y) in out.iter_mut().zip(v) {
+                            *x += y;
+                        }
+                    }
+                    out
+                }
+            },
+            Kind::Decision => {
+                let na = nd.acts.len();
+                if nd.player == br {
+                    let mut best = vec![f64::MIN; self.n(br)];
+                    for &ch in &nd.children {
+                        let v = self.best_response(st, ch, br, r_opp);
+                        for (b, x) in best.iter_mut().zip(v) {
+                            if x > *b {
+                                *b = x;
+                            }
+                        }
+                    }
+                    best
+                } else {
+                    let n_opp = self.n(1 - br);
+                    let strat = strategy(&st.store, node, n_opp, na, true);
+                    let mut out = vec![0.0; self.n(br)];
+                    for (a, &ch) in nd.children.iter().enumerate() {
+                        let q: Vec<f64> = (0..n_opp).map(|h| r_opp[h] * strat[h * na + a]).collect();
+                        let v = self.best_response(st, ch, br, &q);
+                        for (x, y) in out.iter_mut().zip(v) {
+                            *x += y;
+                        }
+                    }
+                    out
+                }
+            }
+        }
     }
 
     /// (сумма выигрышей, сумма весов) руки героя против достижимостей оппонента по всем продолжениям борда.
@@ -438,7 +515,7 @@ fn to_next(x: i64) -> Next {
     if x >= 0 { Next::Show(x as usize) } else { Next::Deal((-x - 1) as usize) }
 }
 
-type Answer = (Vec<(u8, f64, f64, f64)>, f64, Vec<f64>, Vec<f64>, Vec<f64>);
+type Answer = (Vec<(u8, f64, f64, f64)>, f64, Vec<f64>, Vec<f64>, Vec<f64>, f64, Vec<Vec<f64>>, Vec<Vec<f64>>);
 
 /// Решить спот.
 ///
@@ -480,6 +557,8 @@ fn solve(
     hero_index: usize,
     path: Vec<(u8, f64)>,
     want_reach: bool,
+    want_expl: bool,
+    want_all: bool,
 ) -> PyResult<Answer> {
     let n = [hands0.len(), hands1.len()];
     let hands = [hands0, hands1];
@@ -511,9 +590,23 @@ fn solve(
 
     py.allow_threads(|| {
         for it in 1..=iterations {
-            ctx.cfr(&mut root, 0, &w0, &w1, it);
+            ctx.cfr(&mut root, 0, &w0, &w1, it, 0);   // поочерёдные обновления: сначала один игрок,
+            ctx.cfr(&mut root, 0, &w0, &w1, it, 1);   // затем другой — уже против его новой стратегии
         }
     });
+
+    // эксплуатируемость: сколько в среднем теряет наша стратегия против лучшего ответа (в bb)
+    let mut expl = -1.0;
+    if want_expl {
+        let br0 = ctx.best_response(&root, 0, 0, &w1);
+        let br1 = ctx.best_response(&root, 0, 1, &w0);
+        let pairs: f64 = ctx.compat(0, &w1).iter().zip(&w0).map(|(m, w)| m * w).sum();
+        if pairs > 0.0 {
+            let v0: f64 = br0.iter().zip(&w0).map(|(v, w)| v * w).sum::<f64>() / pairs;
+            let v1: f64 = br1.iter().zip(&w1).map(|(v, w)| v * w).sum::<f64>() / pairs;
+            expl = (v0 + v1 - pot) / 2.0;
+        }
+    }
 
     // идём по сыгранным действиям к нужному узлу
     let mut reach = [w0, w1];
@@ -556,7 +649,7 @@ fn solve(
     }
     if want_reach {
         let [a, b] = reach;
-        return Ok((vec![], 0.0, vec![], a, b));
+        return Ok((vec![], 0.0, vec![], a, b, expl, vec![], vec![]));
     }
     let nd = root.tree.nodes[node].clone();
     if nd.kind != Kind::Decision || nd.player != hero_player {
@@ -568,11 +661,16 @@ fn solve(
     let comp = ctx.compat(hero_player, &reach[opp]);
     let norm = if comp[hero_index] > 0.0 { comp[hero_index] } else { 1.0 };
     let mut actions = vec![];
+    let (mut all_freq, mut all_ev) = (vec![], vec![]);
     for (a, &ch) in nd.children.iter().enumerate() {
         let (r0, r1) = (reach[0].clone(), reach[1].clone());
-        let (u0, u1) = ctx.cfr(&mut root, ch, &r0, &r1, 0);
+        let (u0, u1) = ctx.cfr(&mut root, ch, &r0, &r1, 0, 2);
         let u = if hero_player == 0 { u0 } else { u1 };
         actions.push((nd.acts[a].0, nd.acts[a].1, strat[hero_index * na + a], u[hero_index] / norm));
+        if want_all {
+            all_freq.push((0..n[hero_player]).map(|h| strat[h * na + a]).collect());
+            all_ev.push((0..n[hero_player]).map(|h| if comp[h] > 0.0 { u[h] / comp[h] } else { 0.0 }).collect());
+        }
     }
     let (num, den) = ctx.equity(root.after, hero_player, hero_index, &reach[opp]);
     let equity = if den > 0.0 { num / den } else { 0.0 };
@@ -583,7 +681,7 @@ fn solve(
         .map(|(&h, r)| if has(h, hero_hand.0) || has(h, hero_hand.1) { 0.0 } else { *r })
         .collect();
     let [a, b] = reach;
-    Ok((actions, equity, weights, a, b))
+    Ok((actions, equity, weights, a, b, expl, all_freq, all_ev))
 }
 
 #[pymodule]
