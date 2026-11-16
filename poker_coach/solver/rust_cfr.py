@@ -24,16 +24,26 @@ def _idx(card: eval7.Card) -> int:
     return card.rank * 4 + card.suit
 
 
+def _spread(cards, k: int, offset: int):
+    """k карт, равномерно покрывающих ранги и масти: колода по рангам режется на k частей, из каждой — одна карта."""
+    cards = sorted(cards, key=lambda c: (c.rank, c.suit))
+    out = []
+    for i in range(k):
+        chunk = cards[i * len(cards) // k:(i + 1) * len(cards) // k]
+        want = (i + offset) % 4
+        out.append(next((c for c in chunk if c.suit == want), chunk[(i + offset) % len(chunk)]))
+    return out
+
+
 class RustCFR:
     name = "свой солвер на Rust (CFR+)"
 
     def __init__(self, bet_sizes=(0.33, 0.75), turn_sizes=(0.33, 0.75), turn_river_sizes=(0.75,),
                  turn_river_raise: bool = False, flop_sizes=(0.5,), flop_turn_sizes=(0.66,),
-                 flop_river_sizes=(0.75,), raise_mult: float = 3.0, iterations: int = 200,
-                 turn_iterations: int = 70, flop_iterations: int = 45, flop_cards: int = 10,
-                 solve_flop: bool = True, max_raises: int = 1):
-        # чем раньше улица, тем проще дерево: иначе считать слишком долго.
-        # Итерация — два прохода по дереву (обновляется то один игрок, то другой).
+                 flop_river_sizes=(0.75,), raise_mult: float = 3.0, iterations: int = 300,
+                 turn_iterations: int = 120, flop_iterations: int = 80, flop_cards: int = 10,
+                 solve_flop: bool = True, max_raises: int = 1, flop_sampling: str = "random"):
+        # чем раньше улица, тем проще дерево: иначе считать слишком долго
         self.bet_sizes = bet_sizes                       # ривер
         self.turn_sizes, self.turn_river_sizes, self.turn_river_raise = turn_sizes, turn_river_sizes, turn_river_raise
         self.flop_sizes, self.flop_turn_sizes, self.flop_river_sizes = flop_sizes, flop_turn_sizes, flop_river_sizes
@@ -41,6 +51,11 @@ class RustCFR:
         self.iterations, self.turn_iterations, self.flop_iterations = iterations, turn_iterations, flop_iterations
         self.flop_cards = flop_cards                     # сколько карт тёрна и ривера перебирать на флопе
         self.solve_flop = solve_flop
+        self.flop_sampling = flop_sampling               # как выбирать карты тёрна и ривера на флопе
+        self.flop_seed = 0
+        # Поочерёдные обновления игроков сходятся в 2–3 раза быстрее (ниже эксплуатируемость), но совпадение
+        # с эталоном PokerBench с ними ниже (см. README), поэтому по умолчанию оба игрока обновляются за проход.
+        self.alternate = False
         self.max_raises = max_raises                     # рейзов подряд на текущей улице (2 — можно ответить ре-рейзом; медленнее, прироста точности не дало)
         self._cache: dict = {}
 
@@ -64,13 +79,15 @@ class RustCFR:
             return [board], [], [], [], 0
         if len(board) == 4:
             return [board + [c] for c in deck], [[_idx(c) for c in deck]], [list(range(len(deck)))], [1 / 44], -1
-        rng = random.Random("".join(map(str, board)))          # одна и та же выборка для одного флопа
+        rng = random.Random("".join(map(str, board)) + (str(self.flop_seed) if self.flop_seed else ""))   # одна выборка на флоп
         k = min(self.flop_cards, len(deck))
-        turns = rng.sample(deck, k)
+        pick = (lambda cards, off: _spread(cards, k, off)) if self.flop_sampling == "stratified" else \
+               (lambda cards, off: rng.sample(cards, k))
+        turns = pick(deck, 0)
         shows, cards, nexts, weights = [], [[_idx(c) for c in turns]], [[-(i + 2) for i in range(k)]], [49 / (k * 45)]
-        for t in turns:
+        for n, t in enumerate(turns):
             rest = [c for c in deck if c != t]
-            rivers = rng.sample(rest, k)
+            rivers = pick(rest, n + 1)
             cards.append([_idx(c) for c in rivers])
             nexts.append([len(shows) + j for j in range(k)])
             weights.append(48 / (k * 44))
@@ -98,6 +115,7 @@ class RustCFR:
                tuple(sorted(str(a) + str(b) for a, b in ranges[1])),
                tuple(round(w, 4) for w in weights[0]), tuple(round(w, 4) for w in weights[1]),
                round(pot, 2), round(stack, 2), round(extra, 2), lead, hero_p, hero_i, tuple(path), want_reach, want_expl, want_all, iters,
+               self.flop_cards, self.flop_sampling, self.flop_seed, self.alternate,
                tuple(sizes), root_raise, str(deeper_sizes), tuple(deeper_raise))
         if key not in self._cache:
             if len(self._cache) > 200:
@@ -107,7 +125,7 @@ class RustCFR:
                 [float(w) for w in weights[0]], [float(w) for w in weights[1]], strengths[0], strengths[1],
                 cards, nexts, dweights, root_next, float(pot), float(stack), sizes, root_raise,
                 deeper_sizes, deeper_raise, self.raise_mult, float(extra), lead, iters, hero_p, hero_i,
-                [(int(k), float(a)) for k, a in path], want_reach, want_expl, want_all)
+                [(int(k), float(a)) for k, a in path], want_reach, want_expl, want_all, self.alternate)
         return self._cache[key]
 
     # ---------- интерфейс ----------

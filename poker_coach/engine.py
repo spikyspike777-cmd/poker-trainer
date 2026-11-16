@@ -35,6 +35,10 @@ def model_pos(pos: str) -> str:
     return "UTG" if pos in EARLY else pos
 
 
+# Какой долей рук открываются из ранних позиций (типовые чарты 9-max). С UTG стола на шестерых — около 15%.
+EARLY_TIGHT = {"EP1": 0.10, "EP2": 0.115, "EP3": 0.13}
+
+
 def display_pos(pos: str, n: int) -> str:
     """Привычное название позиции за столом на n игроков."""
     seats = SEATS_BY_N[n]
@@ -192,6 +196,9 @@ class Game:
             actions = "/".join(self.pre_tokens)
             line, vpos = classify_preflop(actions, pos)
             v = self.pre_raisers[-1] if vpos is not None else None
+            common["hero_tight"] = EARLY_TIGHT.get(p.pos, 0.0)
+            if v is not None:
+                common["villain_tight"] = EARLY_TIGHT.get(self.players[v].pos, 0.0)
             return GameState(**common, villain_pos=vpos, preflop_line=line, preflop_actions=actions,
                              in_position_override=self._ip(i, v) if v is not None else None,
                              villain_adj=self._adjust_for(i, v))
@@ -200,6 +207,10 @@ class Game:
         names = {i: "hero", v: "villain", **{j: f"v{k}" for k, j in enumerate(extras, start=2)}}
         hist = [(st, names[w], k) for st, w, k in self.history if w in names]
         amts = [a for (st, w, k), a in zip(self.history, self.history_amounts) if w in names]
+        # сужаем диапазон только тому, кто сам открывался из ранней позиции
+        opener = self.pre_raisers[0] if self.pre_raisers else None
+        common["hero_tight"] = EARLY_TIGHT.get(p.pos, 0.0) if opener == i else 0.0
+        common["villain_tight"] = EARLY_TIGHT.get(self.players[v].pos, 0.0) if opener == v else 0.0
         return GameState(
             **common, villain_pos=model_pos(self.players[v].pos), preflop_line=self._relation(i, v),
             hero_invested=p.inv, history=hist, history_amounts=amts, in_position_override=self._ip(i, v),

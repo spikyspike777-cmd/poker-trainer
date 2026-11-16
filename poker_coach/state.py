@@ -85,6 +85,9 @@ class GameState(BaseModel):
         default_factory=list,
         description="Остальные оппоненты в банке (кроме основного): позиция и префлоп-линия относительно героя. "
                     "В history их действия помечены 'v2', 'v3', ...")
+    hero_tight: float = Field(default=0, ge=0, le=1, description="Какой долей рук открываются с позиции героя, если "
+                              "это ранняя позиция стола на 7–9 игроков (0 — поправка не нужна)")
+    villain_tight: float = Field(default=0, ge=0, le=1, description="То же для оппонента, открывшегося из ранней позиции")
     in_position_override: bool | None = Field(
         default=None, description="Явно заданная позиция относительно оппонента (для столов больше шести игроков)")
     preflop_actions: str | None = Field(

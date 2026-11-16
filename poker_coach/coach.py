@@ -191,7 +191,50 @@ def _preflop_other(s: GameState, a: Analysis) -> None:
     a.reasons.append(f"В банке уже {n} рейз(а) и несколько игроков — продолжаем только с очень сильными руками.")
 
 
+UTG_6MAX_OPEN = 0.15      # типичная доля рук открытия с UTG за столом на шестерых
+
+
+def _tighten_early(s: GameState, a: Analysis) -> None:
+    """Столы на 7–9 игроков: из ранних позиций и против опена из них играют уже, чем по чартам 6-max.
+
+    Таблицы солвера для таких столов нет, поэтому диапазон UTG стола на шестерых обрезается до типичной
+    для 9-max доли рук. Это оценка.
+    """
+    opening = s.preflop_line == L.UNOPENED and s.hero_tight > 0
+    versus = s.preflop_line == L.VS_OPEN and s.villain_tight > 0
+    if not (opening or versus) or a.action == "fold":
+        return
+    key = charts.hand_key(s.hero_cards)
+    if opening:
+        keys = preflop_gto.range_keys("", "UTG", "raise") or ()
+        base = list(charts.keys_to_combos(keys)) if keys else charts.combos(charts.RFI["UTG"])
+        kept = ranges.early(base, s.hero_tight)
+    else:                          # против узкого опена продолжаем во столько же раз уже
+        line = preflop_gto.abstract(f"{s.villain_pos}/2.0bb")
+        keys = [k for kind in ("raise", "call") for k in (preflop_gto.range_keys(line, s.hero_pos, kind) or ())]
+        r3, rc = charts.vs_open_ranges(s.hero_pos, s.villain_pos)
+        base = list(charts.keys_to_combos(tuple(keys))) if keys else charts.combos(r3) + charts.combos(rc)
+        kept = charts.scale_range(base, min(1.0, s.villain_tight / UTG_6MAX_OPEN))
+    hero = set(to_eval7(s.hero_cards))
+    pct = 100 * len(kept) / 1326
+    if any(set(c) == hero for c in kept):
+        a.reasons.append(f"Поправка на большой стол: {'открываемся' if opening else 'продолжаем'} верхними "
+                         f"{pct:.0f}% рук, {key} в них входит.")
+    else:
+        a.action, a.amount, a.sizing = "fold", None, ""
+        a.reasons.append(
+            f"Поправка на большой стол: {'с такой ранней позиции открываются' if opening else 'против опена из ранней позиции продолжают'} "
+            f"только верхними {pct:.0f}% рук, {key} в них не входит — фолд. Таблицы солвера для столов на 7–9 игроков нет, "
+            "это оценка.")
+    a.source += "; с поправкой на ранние позиции большого стола"
+
+
 def _preflop(s: GameState, a: Analysis, use_table: bool = True) -> None:
+    _preflop_inner(s, a, use_table)
+    _tighten_early(s, a)
+
+
+def _preflop_inner(s: GameState, a: Analysis, use_table: bool = True) -> None:
     if use_table and _preflop_table(s, a):
         return
     if s.preflop_line == L.OTHER:
@@ -326,8 +369,8 @@ def _postflop_multiway(s: GameState, a: Analysis) -> None:
     if s.to_call > 0:
         a.reasons.append(f"Нужно доставить {s.to_call:g} bb в банк {s.pot:g} bb — колл окупается "
                          f"при эквити от {a.required:.0%}.")
-        margin = 0.04 if river else (-0.03 if n_outs >= 8 else 0.0)
-        if eq >= 0.65:
+        margin = P["mw_call_margin"] + (0.04 if river else (-0.03 if n_outs >= 8 else 0.0))
+        if eq >= P["mw_raise"]:
             raise_to = round(s.to_call * 3, 1)
             if raise_to >= s.stack * 0.6:
                 a.action = "allin"
@@ -340,7 +383,7 @@ def _postflop_multiway(s: GameState, a: Analysis) -> None:
                              "и против нескольких диапазонов рука недостаточно сильна.")
         else:
             a.reasons.append(f"Эквити {eq:.0%} ниже нужных {a.required:.0%} — фолд.")
-    elif eq >= 0.55:
+    elif eq >= P["mw_value"]:
         _bet(s, a, 0.66)
         a.reasons.append("Сильная рука против нескольких оппонентов — ставка для велью и защиты: "
                          "чем больше игроков, тем чаще кто-то из них усилится.")

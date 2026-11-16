@@ -177,6 +177,7 @@ struct Ctx {
     shows: Vec<Show>,
     deals: Vec<Deal>,
     raise_mult: f64,
+    quadratic: bool,
 }
 
 type Util = (Vec<f64>, Vec<f64>);
@@ -383,7 +384,7 @@ impl Ctx {
             }
         }
         if iter > 0 && (upd == 2 || upd == player) {
-            let w = (iter * iter) as f64; // квадратичное усреднение: поздние итерации важнее
+            let w = if self.quadratic { (iter * iter) as f64 } else { iter as f64 }; // вес итерации в средней стратегии
             for h in 0..n_me {
                 for a in 0..n_acts {
                     let i = h * n_acts + a;
@@ -559,6 +560,7 @@ fn solve(
     want_reach: bool,
     want_expl: bool,
     want_all: bool,
+    alternate: bool,
 ) -> PyResult<Answer> {
     let n = [hands0.len(), hands1.len()];
     let hands = [hands0, hands1];
@@ -585,13 +587,17 @@ fn solve(
         .map(|((cards, next), weight)| Deal { cards, weight, next: next.into_iter().map(to_next).collect() })
         .collect();
     let deeper: Vec<StreetCfg> = deeper_sizes.into_iter().zip(deeper_raises).map(|(sizes, max_raises)| StreetCfg { sizes, max_raises }).collect();
-    let ctx = Ctx { hands, same, shows, deals, raise_mult };
+    let ctx = Ctx { hands, same, shows, deals, raise_mult, quadratic: alternate };
     let mut root = ctx.make_street(pot, stack, &sizes, extra_bet, oop_can_lead, root_raises, to_next(root_next), &deeper);
 
     py.allow_threads(|| {
         for it in 1..=iterations {
-            ctx.cfr(&mut root, 0, &w0, &w1, it, 0);   // поочерёдные обновления: сначала один игрок,
-            ctx.cfr(&mut root, 0, &w0, &w1, it, 1);   // затем другой — уже против его новой стратегии
+            if alternate {
+                ctx.cfr(&mut root, 0, &w0, &w1, it, 0); // поочерёдные обновления: сначала один игрок,
+                ctx.cfr(&mut root, 0, &w0, &w1, it, 1); // затем другой — уже против его новой стратегии
+            } else {
+                ctx.cfr(&mut root, 0, &w0, &w1, it, 2); // оба игрока за один проход
+            }
         }
     });
 

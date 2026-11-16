@@ -15,5 +15,8 @@
  "check_back_drop": 0.1,
  "table_ranges": 0,
  "solved_ranges": 1,
- "data_ranges": 1
+ "data_ranges": 1,
+ "mw_value": 0.5,
+ "mw_raise": 0.65,
+ "mw_call_margin": 0.0
 }
