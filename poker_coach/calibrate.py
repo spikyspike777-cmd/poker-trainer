@@ -22,6 +22,33 @@ FEATS = (["street", "ip", "call_frac", "invested", "spr", "equity", "required"]
 MODEL = Path(__file__).resolve().parent / "data" / "calibrator.joblib"
 
 
+def family(kind: str, facing: bool) -> str:
+    """Олл-ин — это рейз, если есть ставка, и бет, если её нет."""
+    if kind == "allin":
+        return "raise" if facing else "bet"
+    return kind
+
+
+def features(a, st, moves: set[str] | None = None) -> dict:
+    """Выход солвера в виде признаков. moves — доступные типы действий (по умолчанию — те, что есть в дереве)."""
+    facing = st.to_call > 0
+    freq = {f: 0.0 for f in FAMILIES}
+    best: dict[str, float] = {}
+    for kind, _amount, f, ev in a.all_actions:
+        fam = family(kind, facing)
+        freq[fam] += f
+        best[fam] = max(best.get(fam, -1e9), ev)
+    top_ev = max(best.values())
+    moves = moves if moves is not None else set(best)
+    return dict(
+        street=["flop", "turn", "river"].index(st.street), ip=int(st.in_position),
+        call_frac=st.to_call / st.pot, invested=int(st.hero_invested > 0), spr=min(st.stack / st.pot, 20.0),
+        equity=a.equity or 0.0, required=a.required,
+        **{f"p_{f}": freq[f] for f in FAMILIES},
+        **{f"gap_{f}": (top_ev - best[f]) / st.pot if f in best else 1.0 for f in FAMILIES},
+        **{f"can_{f}": int(f in moves) for f in FAMILIES}), best, top_ev, freq
+
+
 def load(path: str):
     rows = [json.loads(line) for line in open(path)]
     rows = [r for r in rows if r["gold"] in FAMILIES]

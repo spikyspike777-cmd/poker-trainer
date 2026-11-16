@@ -401,6 +401,36 @@ def _oop_can_lead(s: GameState) -> bool:
     return last[-1] == oop
 
 
+def _calibrate(s: GameState, a: Analysis, pot0: float) -> bool:
+    """Заменить выбор «самое частое действие» на ответ модели, обученной на эталоне PokerBench."""
+    from . import calibrate
+    facing = s.to_call > 0
+    if facing:                                   # все действия, разрешённые правилами, а не только ветки дерева
+        legal = {"fold", "call"} | ({"raise"} if s.stack > s.to_call else set())
+    else:
+        legal = {"check"} | ({"bet"} if s.stack > 0 else set())
+    feats, _best, _top, _freq = calibrate.features(a, s, legal)
+    fam = calibrate.choose(feats)
+    if fam is None or fam == calibrate.family(a.action, facing):
+        return False
+    cands = [x for x in a.all_actions if calibrate.family(x[0], facing) == fam]
+    if cands:
+        kind, amount, _f, _ev = max(cands, key=lambda x: x[3])       # лучший по EV размер внутри выбранного типа
+    elif fam == "raise":                         # в дереве солвера такого рейза нет — берём стандартный размер
+        amount = round(3 * (s.to_call + s.hero_invested), 1)
+        kind = "raise"
+    elif fam == "bet":
+        kind, amount = "bet", round(0.75 * pot0, 1)
+    else:
+        return False
+    if kind in ("bet", "raise") and amount >= s.stack + s.hero_invested:
+        kind = "allin"
+    a.action = kind
+    a.amount = s.to_call if kind == "call" else amount if kind in ("bet", "raise") else None
+    a.sizing = f"{amount / pot0:.0%} банка" if kind == "bet" else ("3× ставки" if kind == "raise" else "")
+    return True
+
+
 def _solve(s: GameState, a: Analysis, hero, board) -> None:
     """Если солвер умеет этот спот — заменить эвристический совет равновесной стратегией."""
     path = None
@@ -441,6 +471,7 @@ def _solve(s: GameState, a: Analysis, hero, board) -> None:
     a.equity = res.equity
     a.villain.combos, a.villain.weights, a.villain.narrowed = res.villain_combos, res.villain_weights, True
     a.villain.label = a.villain.label.split(",")[0] + "; частоты рук — из решения солвера"
+    calibrated = _calibrate(s, a, pot0) if P["calibrate"] else False
     eq = a.equity
     r = [f"Сейчас у вас {a.hand}. Против рук, с которыми оппонент доходит до этой точки, ваше эквити — {eq:.0%}."]
     if s.to_call > 0:
@@ -449,6 +480,10 @@ def _solve(s: GameState, a: Analysis, hero, board) -> None:
     r.append(f"Равновесная стратегия с этой рукой: {parts}.")
     if len(a.mix) > 1 and a.mix[1][2] >= 0.25:
         r.append("Солвер смешивает действия: их ожидание почти одинаково, поэтому ошибкой не будет ни одно из них.")
+    kind = a.action
+    if calibrated:
+        r.append("Действие выбрано моделью, обученной на эталонных решениях: в похожих спотах эталон "
+                 f"выбирает «{ACTION_RU[kind].lower()}», хотя наш солвер чаще играет иначе.")
     if kind in ("bet", "raise", "allin"):
         r.append("Это ставка для велью: вас заколлирует достаточно худших рук." if eq >= 0.5 else
                  "Это блеф: на вскрытии рука почти не выигрывает, а ставка заставит сбросить часть более сильных рук.")

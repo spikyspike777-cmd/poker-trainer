@@ -165,36 +165,14 @@ def _post_job(args):
     return row["evaluation_at"], g[0], kind, label == gold_label, label, top, extra
 
 
-FAMILIES = ["fold", "check", "call", "bet", "raise"]
-
-
-def _family(kind: str, facing: bool) -> str:
-    if kind == "allin":
-        return "raise" if facing else "bet"
-    return kind
-
-
 def _features(a, st, row: dict, g: list[str]) -> dict:
-    """Выход солвера в виде признаков + насколько действие эталона хуже лучшего по нашему солверу."""
-    facing = st.to_call > 0
-    freq = {f: 0.0 for f in FAMILIES}
-    best = {}
-    for kind, amount, f, ev in a.all_actions:
-        fam = _family(kind, facing)
-        freq[fam] += f
-        best[fam] = max(best.get(fam, -1e9), ev)
-    top_ev = max(best.values())
+    """Признаки спота + насколько действие эталона хуже лучшего по нашему солверу."""
+    from . import calibrate
     moves = {m.split()[0].lower() for m in ast.literal_eval(row["available_moves"])}
+    feats, best, top_ev, freq = calibrate.features(a, st, moves)
     gold_ev = best.get(g[0])
-    return dict(
-        street=["Flop", "Turn", "River"].index(row["evaluation_at"]), ip=int(st.in_position),
-        call_frac=st.to_call / st.pot, invested=int(st.hero_invested > 0), spr=min(st.stack / st.pot, 20.0),
-        equity=a.equity or 0.0, required=a.required,
-        **{f"p_{f}": freq[f] for f in FAMILIES},
-        **{f"gap_{f}": (top_ev - best[f]) / st.pot if f in best else 1.0 for f in FAMILIES},
-        **{f"can_{f}": int(f in moves) for f in FAMILIES},
-        gold=g[0], gold_gap_bb=None if gold_ev is None else top_ev - gold_ev,
-        gold_gap_pot=None if gold_ev is None else (top_ev - gold_ev) / st.pot, gold_freq=freq.get(g[0], 0.0))
+    return dict(feats, gold=g[0], gold_gap_bb=None if gold_ev is None else top_ev - gold_ev,
+                gold_gap_pot=None if gold_ev is None else (top_ev - gold_ev) / st.pot, gold_freq=freq.get(g[0], 0.0))
 
 
 def USE_HISTORY_set(o) -> None:
@@ -351,6 +329,7 @@ def main() -> None:
     p.add_argument("--no-history", action="store_true", help="не учитывать историю ставок")
     p.add_argument("--no-table", action="store_true", help="префлоп только по ручным чартам")
     p.add_argument("--solver-args", default="{}", help='настройки солвера в JSON, например {"turn_sizes": [0.66]}')
+    p.add_argument("--calibrate", action="store_true", help="выбирать действие моделью поверх солвера")
     p.add_argument("--dump", help="записать признаки спотов (выход солвера) в файл JSONL")
     p.add_argument("--set", action="append", default=[], help="параметр из params.py: имя=значение")
     p.add_argument("--skip-postflop", action="store_true")
@@ -361,6 +340,8 @@ def main() -> None:
                 solved=bool(P["solved_ranges"]) and not a.no_solved_ranges, no_flop=a.no_flop, train=a.train,
                 street=a.street, solver_args=json.loads(a.solver_args),
                 params={k: float(v) for k, v in (x.split("=") for x in a.set)})
+    if a.calibrate:
+        opts["params"]["calibrate"] = 1
     coach.USE_GTO_TABLE = not a.no_table
     pre = [] if a.skip_preflop else run_preflop()
     post = [] if a.skip_postflop else run_postflop(a.n, opts, seed=a.seed)
