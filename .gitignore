@@ -5,3 +5,4 @@ __pycache__/
 *.whl
 solver_rs/target/
 tools/ref_compare/target/
+poker_coach/data/value_turn.*

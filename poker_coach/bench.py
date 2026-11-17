@@ -147,6 +147,9 @@ def _post_job(args):
     elif coach.SOLVER is not None:
         for k, v in o.get("solver_args", {}).items():
             setattr(coach.SOLVER, k, tuple(v) if isinstance(v, list) else v)
+        if o.get("params", {}).get("value_net") and getattr(coach.SOLVER, "value_net", 1) is None:
+            from . import valuenet
+            coach.SOLVER.value_net = valuenet.load()
         if o.get("no_flop") and hasattr(coach.SOLVER, "solve_flop"):
             coach.SOLVER.solve_flop = False
     top, extra = None, None

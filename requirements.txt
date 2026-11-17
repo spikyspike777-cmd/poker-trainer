@@ -5,3 +5,4 @@ pytest
 numpy
 scikit-learn   # только для calibrate.py (модель поверх солвера)
 joblib
+torch          # только для обучения сети-оценщика (poker_coach/valuenet)

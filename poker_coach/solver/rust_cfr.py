@@ -42,7 +42,8 @@ class RustCFR:
                  turn_river_raise: bool = False, flop_sizes=(0.5,), flop_turn_sizes=(0.66,),
                  flop_river_sizes=(0.75,), raise_mult: float = 3.0, iterations: int = 300,
                  turn_iterations: int = 120, flop_iterations: int = 80, flop_cards: int = 10,
-                 solve_flop: bool = True, max_raises: int = 1, flop_sampling: str = "random"):
+                 solve_flop: bool = True, max_raises: int = 1, flop_sampling: str = "random",
+                 turn_river_raises: int | None = None, value_net=None):
         # чем раньше улица, тем проще дерево: иначе считать слишком долго
         self.bet_sizes = bet_sizes                       # ривер
         self.turn_sizes, self.turn_river_sizes, self.turn_river_raise = turn_sizes, turn_river_sizes, turn_river_raise
@@ -53,6 +54,11 @@ class RustCFR:
         self.solve_flop = solve_flop
         self.flop_sampling = flop_sampling               # как выбирать карты тёрна и ривера на флопе
         self.flop_seed = 0
+        # число рейзов на ривере внутри решения тёрна (по умолчанию 0 или 1 — по флагу turn_river_raise)
+        self.turn_river_raises = turn_river_raises
+        # сеть-оценщик «после тёрна» (poker_coach.valuenet.load): если задана, ривер внутри решения тёрна
+        # не перебирается, его оценивает сеть
+        self.value_net = value_net
         # Поочерёдные обновления игроков сходятся в 2–3 раза быстрее (ниже эксплуатируемость), но совпадение
         # с эталоном PokerBench с ними ниже (см. README), поэтому по умолчанию оба игрока обновляются за проход.
         self.alternate = False
@@ -106,16 +112,20 @@ class RustCFR:
             cfg = (list(self.bet_sizes), self.max_raises, [], [], self.iterations)
         elif n == 4:
             cfg = (list(self.turn_sizes), self.max_raises, [list(self.turn_river_sizes)],
-                   [1 if self.turn_river_raise else 0], self.turn_iterations)
+                   [self.turn_river_raises if self.turn_river_raises is not None else (1 if self.turn_river_raise else 0)],
+                   self.turn_iterations)
         else:
             cfg = (list(self.flop_sizes), self.max_raises, [list(self.flop_turn_sizes), list(self.flop_river_sizes)],
                    [0, 0], self.flop_iterations)
         sizes, root_raise, deeper_sizes, deeper_raise, iters = cfg
+        net = self.value_net if n == 4 else None
+        if net is not None:
+            root_next = -1000                    # листья тёрна оценивает сеть; выход ривера 0 — для олл-инов и эквити
         key = (tuple(map(str, board)), tuple(sorted(str(a) + str(b) for a, b in ranges[0])),
                tuple(sorted(str(a) + str(b) for a, b in ranges[1])),
                tuple(round(w, 4) for w in weights[0]), tuple(round(w, 4) for w in weights[1]),
                round(pot, 2), round(stack, 2), round(extra, 2), lead, hero_p, hero_i, tuple(path), want_reach, want_expl, want_all, iters,
-               self.flop_cards, self.flop_sampling, self.flop_seed, self.alternate,
+               self.flop_cards, self.flop_sampling, self.flop_seed, self.alternate, net is not None,
                tuple(sizes), root_raise, str(deeper_sizes), tuple(deeper_raise))
         if key not in self._cache:
             if len(self._cache) > 200:
@@ -125,7 +135,8 @@ class RustCFR:
                 [float(w) for w in weights[0]], [float(w) for w in weights[1]], strengths[0], strengths[1],
                 cards, nexts, dweights, root_next, float(pot), float(stack), sizes, root_raise,
                 deeper_sizes, deeper_raise, self.raise_mult, float(extra), lead, iters, hero_p, hero_i,
-                [(int(k), float(a)) for k, a in path], want_reach, want_expl, want_all, self.alternate)
+                [(int(k), float(a)) for k, a in path], want_reach, want_expl, want_all, self.alternate,
+                [_idx(c) for c in board], False, net)
         return self._cache[key]
 
     # ---------- интерфейс ----------
@@ -169,7 +180,7 @@ class RustCFR:
 
         -> (действия [(тип, сумма)], частоты [действие][рука], EV [действие][рука], эксплуатируемость в bb)
         """
-        acts, _e, _w, _r0, _r1, expl, freq, ev = self._run(
+        acts, _e, _w, _r0, _r1, expl, freq, ev, *_rest = self._run(
             board, [list(oop), list(ip)], [list(w_oop), list(w_ip)], pot, stack, 0.0, lead, player, 0, list(path),
             want_expl=True, want_all=True)
         return [(_KINDS[k], amt) for k, amt, _f, _v in acts], freq, ev, expl

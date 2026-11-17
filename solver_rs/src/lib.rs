@@ -36,6 +36,7 @@ struct Node {
 struct Tree {
     nodes: Vec<Node>,
     pot: f64,
+    stack: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -111,7 +112,7 @@ fn opening(t: &mut Tree, player: usize, stack: f64, sizes: &[f64], extra: f64, l
 }
 
 fn build(pot: f64, stack: f64, sizes: &[f64], extra: f64, lead: bool, cfg: &Cfg) -> Tree {
-    let mut t = Tree { nodes: vec![], pot };
+    let mut t = Tree { nodes: vec![], pot, stack };
     opening(&mut t, 0, stack, sizes, extra, lead, cfg);
     t
 }
@@ -146,6 +147,7 @@ struct Show {
 enum Next {
     Show(usize), // вскрытие с данными shows[i]
     Deal(usize), // выходит следующая карта: deals[i]
+    Net(usize),  // остаток раздачи оценивает нейросеть; deals[i] нужен только для листьев-олл-инов
 }
 
 /// Выход карты: какие карты перебираем, с каким весом и что дальше после каждой.
@@ -167,7 +169,91 @@ struct Street {
     store: Store,
     after: Next,
     leaf_of: Vec<usize>,    // узел -> номер листа (usize::MAX, если не лист)
-    kids: Vec<Vec<Street>>, // [лист][карта]
+    kids: Vec<Vec<Street>>, // [лист][карта]; пусто, если лист оценивает нейросеть
+    board: Vec<u8>,         // карты борда на этой улице
+}
+
+const F_HAND: usize = 7; // признаков на руку
+const C_CTX: usize = 41; // признаков общего контекста
+
+/// Сеть одного игрока: оценивает каждую руку по её признакам и общему контексту.
+struct Head {
+    wf: Vec<f32>, // [h][F_HAND]
+    wc: Vec<f32>, // [h][hc]
+    b: Vec<f32>,
+    blocks: Vec<(Vec<f32>, Vec<f32>)>, // остаточные блоки: (вес [h][h], сдвиг)
+    wo: Vec<f32>,
+    bo: f32,
+}
+
+/// Веса сети-оценщика: контекст -> два слоя; затем для каждой руки своя оценка общей сетью игрока.
+struct Net {
+    hc: usize,
+    h: usize,
+    wc1: Vec<f32>, // [hc][C_CTX]
+    bc1: Vec<f32>,
+    wc2: Vec<f32>, // [hc][hc]
+    bc2: Vec<f32>,
+    heads: [Head; 2],
+}
+
+/// Обученная сеть-оценщик. Создаётся из Python: все веса одним блоком байтов float32.
+#[pyclass]
+struct ValueNet {
+    net: std::sync::Arc<Net>,
+}
+
+#[pymethods]
+impl ValueNet {
+    #[new]
+    fn new(hc: usize, h: usize, n_blocks: usize, blob: &[u8]) -> PyResult<Self> {
+        let all: Vec<f32> = blob.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let head_len = h * F_HAND + h * hc + h + n_blocks * (h * h + h) + h + 1;
+        if all.len() != hc * C_CTX + hc + hc * hc + hc + 2 * head_len {
+            return Err(pyo3::exceptions::PyValueError::new_err("размер весов не соответствует архитектуре сети"));
+        }
+        let mut at = 0;
+        let mut take = |n: usize| {
+            let v = all[at..at + n].to_vec();
+            at += n;
+            v
+        };
+        let (wc1, bc1, wc2, bc2) = (take(hc * C_CTX), take(hc), take(hc * hc), take(hc));
+        let mut head = || {
+            let (wf, wc, b) = (take(h * F_HAND), take(h * hc), take(h));
+            let blocks = (0..n_blocks).map(|_| (take(h * h), take(h))).collect();
+            let (wo, bo) = (take(h), take(1)[0]);
+            Head { wf, wc, b, blocks, wo, bo }
+        };
+        let heads = [head(), head()];
+        Ok(ValueNet { net: std::sync::Arc::new(Net { hc, h, wc1, bc1, wc2, bc2, heads }) })
+    }
+}
+
+/// Всё, что нужно сети в листе: контекст, признаки рук и точная «ценность без ставок».
+struct LeafFeat {
+    ctx: Vec<f32>,
+    f: [Vec<f32>; 2], // [рука][F_HAND]
+    e: [Vec<f64>; 2], // ценность без ставок: в долях банка, без половины банка, с весами оппонента как есть
+    m: [Vec<f64>; 2], // суммарный вес рук оппонента, совместимых с рукой
+}
+
+/// Скалярное произведение с восемью независимыми сумматорами: так компилятор превращает цикл
+/// в векторные инструкции (обычная сумма чисел с плавающей точкой не векторизуется).
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0.0f32; 8];
+    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (x, y) in ca.zip(cb) {
+        for i in 0..8 {
+            acc[i] += x[i] * y[i];
+        }
+    }
+    let mut tail = 0.0;
+    for (x, y) in ra.iter().zip(rb) {
+        tail += x * y;
+    }
+    acc.iter().sum::<f32>() + tail
 }
 
 /// Неизменяемая часть задачи.
@@ -178,6 +264,7 @@ struct Ctx {
     deals: Vec<Deal>,
     raise_mult: f64,
     quadratic: bool,
+    net: Option<std::sync::Arc<Net>>,
 }
 
 type Util = (Vec<f64>, Vec<f64>);
@@ -192,29 +279,204 @@ impl Ctx {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn make_street(&self, pot: f64, stack: f64, sizes: &[f64], extra: f64, lead: bool, max_raises: u8,
+    fn make_street(&self, board: &[u8], pot: f64, stack: f64, sizes: &[f64], extra: f64, lead: bool, max_raises: u8,
                    after: Next, deeper: &[StreetCfg]) -> Street {
         let n = [self.n(0), self.n(1)];
         let tree = build(pot, stack, sizes, extra, lead, &Cfg { raise_mult: self.raise_mult, max_raises });
         let store = Store::new(&tree, n);
         let mut leaf_of = vec![usize::MAX; tree.nodes.len()];
         let mut kids = vec![];
-        if let Next::Deal(d) = after {
+        let deal = match after {
+            Next::Deal(d) => Some((d, false)),
+            Next::Net(d) => Some((d, true)),
+            Next::Show(_) => None,
+        };
+        if let Some((d, by_net)) = deal {
             for (id, nd) in tree.nodes.iter().enumerate() {
                 if nd.kind == Kind::Close {
                     leaf_of[id] = kids.len();
                     let c = nd.c[0];
+                    let rest = (stack - c).max(0.0);
+                    if by_net && rest > 1e-9 {
+                        kids.push(vec![]); // этот лист оценит сеть; олл-ины считаются точно, перебором карт
+                        continue;
+                    }
                     let row: Vec<Street> = self.deals[d]
                         .next
                         .iter()
-                        .map(|nx| self.make_street(pot + 2.0 * c, (stack - c).max(0.0), &deeper[0].sizes, 0.0, true,
-                                                   deeper[0].max_raises, *nx, &deeper[1..]))
+                        .zip(&self.deals[d].cards)
+                        .map(|(nx, card)| {
+                            let mut b = board.to_vec();
+                            b.push(*card);
+                            // после олл-ина торговли нет: дерево из одних чеков, дальше — только выход карт и вскрытие
+                            let nx = if by_net { Self::exact(*nx) } else { *nx };
+                            self.make_street(&b, pot + 2.0 * c, rest, &deeper[0].sizes, 0.0, true, deeper[0].max_raises, nx, &deeper[1..])
+                        })
                         .collect();
                     kids.push(row);
                 }
             }
         }
-        Street { tree, store, after, leaf_of, kids }
+        Street { tree, store, after, leaf_of, kids, board: board.to_vec() }
+    }
+
+    fn exact(nx: Next) -> Next {
+        match nx {
+            Next::Net(d) => Next::Deal(d),
+            other => other,
+        }
+    }
+
+    /// Признаки листа «улица закончена, следующая карта не вышла». Перебирает все карты выхода `d`
+    /// и на каждой считает вскрытие без ставок. Используется и при обучении, и при игре.
+    fn leaf_features(&self, d: usize, board: &[u8], pot: f64, stack: f64, r0: &[f64], r1: &[f64]) -> LeafFeat {
+        let deal = &self.deals[d];
+        let n = [self.n(0), self.n(1)];
+        // по каждой карте: (ценность без ставок, эквити руки) для обоих игроков
+        let per_card: Vec<[(Vec<f64>, Vec<f64>); 2]> = (0..deal.cards.len())
+            .into_par_iter()
+            .map(|i| {
+                let card = deal.cards[i];
+                let id = match deal.next[i] {
+                    Next::Show(id) => id,
+                    _ => panic!("сеть-оценщик поддерживает только точку перед последней картой"),
+                };
+                let q0: Vec<f64> = r0.iter().zip(&self.hands[0]).map(|(r, h)| if has(*h, card) { 0.0 } else { *r }).collect();
+                let q1: Vec<f64> = r1.iter().zip(&self.hands[1]).map(|(r, h)| if has(*h, card) { 0.0 } else { *r }).collect();
+                let (u0, u1) = self.showdown(id, 1.0, 0.0, &q0, &q1);
+                let mm = [self.compat(0, &q1), self.compat(1, &q0)];
+                let us = [u0, u1];
+                let mut out: [(Vec<f64>, Vec<f64>); 2] = [(vec![], vec![]), (vec![], vec![])];
+                for p in 0..2 {
+                    let mut e = vec![f64::NAN; n[p]]; // NAN — рука содержит эту карту
+                    let mut q = vec![f64::NAN; n[p]];
+                    for h in 0..n[p] {
+                        if !has(self.hands[p][h], card) {
+                            e[h] = us[p][h] - 0.5 * mm[p][h];
+                            q[h] = if mm[p][h] > 1e-12 { e[h] / mm[p][h] } else { 0.0 };
+                        }
+                    }
+                    out[p] = (e, q);
+                }
+                out
+            })
+            .collect();
+        let reach = [r0, r1];
+        let m = [self.compat(0, r1), self.compat(1, r0)];
+        let sums = [r0.iter().sum::<f64>().max(1e-300), r1.iter().sum::<f64>().max(1e-300)];
+        let mut e = [vec![0.0; n[0]], vec![0.0; n[1]]];
+        let mut f = [vec![0.0f32; n[0] * F_HAND], vec![0.0f32; n[1] * F_HAND]];
+        let mut ctx = vec![0.0f32; C_CTX];
+        ctx[0] = (pot / (pot + 2.0 * stack)) as f32;
+        ctx[1] = ((1.0 + (stack / pot).min(200.0)).ln() / 4.0) as f32;
+        let mut suits = [0.0f32; 4];
+        for &c in board {
+            ctx[2 + (c / 4) as usize] += 0.5; // сколько карт каждого ранга
+            suits[(c % 4) as usize] += 0.25;
+        }
+        suits.sort_by(|a, b| b.partial_cmp(a).unwrap()); // масти по убыванию числа карт: неважно, как они названы
+        ctx[15..19].copy_from_slice(&suits);
+        for p in 0..2 {
+            let opp_sum = sums[1 - p];
+            let mut q = vec![0.0; n[p]];
+            for h in 0..n[p] {
+                let (mut s1, mut s2, mut cnt, mut hi, mut lo) = (0.0, 0.0, 0.0, 0.0, 0.0);
+                for card in &per_card {
+                    let (ev, qv) = (&card[p].0[h], &card[p].1[h]);
+                    if ev.is_nan() {
+                        continue;
+                    }
+                    e[p][h] += ev * deal.weight;
+                    s1 += qv;
+                    s2 += qv * qv;
+                    cnt += 1.0;
+                    if *qv > 0.35 {
+                        hi += 1.0;
+                    }
+                    if *qv < -0.35 {
+                        lo += 1.0;
+                    }
+                }
+                q[h] = if m[p][h] > 1e-12 { e[p][h] / m[p][h] } else { 0.0 };
+                let cnt = f64::max(cnt, 1.0);
+                let sd = (s2 / cnt - (s1 / cnt) * (s1 / cnt)).max(0.0).sqrt();
+                let row = &mut f[p][h * F_HAND..(h + 1) * F_HAND];
+                row[0] = (2.0 * q[h]) as f32; // эквити против диапазона оппонента, от −1 до 1
+                row[1] = (2.0 * sd) as f32; // насколько эквити зависит от карты
+                row[2] = (hi / cnt) as f32; // доля карт, на которых рука почти всегда выигрывает
+                row[3] = (lo / cnt) as f32; // доля карт, на которых почти всегда проигрывает
+                row[6] = ((m[p][h] / opp_sum - 0.85) * 5.0) as f32; // сколько рук оппонента рука блокирует
+            }
+            // место руки в своём диапазоне по силе и её относительный вес
+            let mut order: Vec<usize> = (0..n[p]).collect();
+            order.sort_by(|&a, &b| q[a].partial_cmp(&q[b]).unwrap());
+            let positive = reach[p].iter().filter(|r| **r > 0.0).count().max(1) as f64;
+            let mut below = 0.0;
+            let mut mean_q = 0.0;
+            for &h in &order {
+                let w = reach[p][h] / sums[p];
+                f[p][h * F_HAND + 4] = (below + 0.5 * w) as f32;
+                below += w;
+                f[p][h * F_HAND + 5] = if w > 0.0 { ((w * positive).ln().clamp(-4.0, 4.0) / 4.0) as f32 } else { -1.0 };
+                let bin = (((q[h] + 0.5) * 10.0) as usize).min(9);
+                ctx[19 + p * 10 + bin] += w as f32; // распределение диапазона по силе
+                mean_q += w * q[h];
+            }
+            ctx[39 + p] = (2.0 * mean_q) as f32;
+        }
+        LeafFeat { ctx, f, e, m }
+    }
+
+    /// Прямой проход сети: поправка за торговлю для каждой руки, в долях банка (диапазон оппонента с суммой 1).
+    fn net_forward(&self, net: &Net, lf: &LeafFeat) -> [Vec<f64>; 2] {
+        let (hc, h) = (net.hc, net.h);
+        let c1: Vec<f32> = (0..hc).map(|i| (net.bc1[i] + dot(&net.wc1[i * C_CTX..(i + 1) * C_CTX], &lf.ctx)).max(0.0)).collect();
+        let c2: Vec<f32> = (0..hc).map(|i| (net.bc2[i] + dot(&net.wc2[i * hc..(i + 1) * hc], &c1)).max(0.0)).collect();
+        let mut out: [Vec<f64>; 2] = [vec![], vec![]];
+        for p in 0..2 {
+            let head = &net.heads[p];
+            let base: Vec<f32> = (0..h).map(|i| head.b[i] + dot(&head.wc[i * hc..(i + 1) * hc], &c2)).collect();
+            out[p] = lf.f[p]
+                .par_chunks(F_HAND)
+                .map(|row| {
+                    let mut z: Vec<f32> = (0..h).map(|i| (base[i] + dot(&head.wf[i * F_HAND..(i + 1) * F_HAND], row)).max(0.0)).collect();
+                    for (w, b) in &head.blocks {
+                        let y: Vec<f32> = (0..h).map(|i| (b[i] + dot(&w[i * h..(i + 1) * h], &z)).max(0.0)).collect();
+                        for i in 0..h {
+                            z[i] += y[i];
+                        }
+                    }
+                    (head.bo + dot(&head.wo, &z)) as f64
+                })
+                .collect();
+        }
+        out
+    }
+
+    /// Оценка остатка раздачи: точная «ценность без ставок» плюс поправка за торговлю от сети.
+    /// Возвращает полезности в тех же единицах, что и решение следующей улицы с банком `pot`.
+    fn net_leaf(&self, net: &Net, d: usize, board: &[u8], pot: f64, stack: f64, r0: &[f64], r1: &[f64]) -> Util {
+        let s0: f64 = r0.iter().sum();
+        let s1: f64 = r1.iter().sum();
+        if s0 <= 1e-12 || s1 <= 1e-12 {
+            // у одного из игроков пустой диапазон: делим банк поровну с теми руками, что остались
+            let m0 = self.compat(0, r1);
+            let m1 = self.compat(1, r0);
+            return (m0.iter().map(|m| pot / 2.0 * m).collect(), m1.iter().map(|m| pot / 2.0 * m).collect());
+        }
+        let lf = self.leaf_features(d, board, pot, stack, r0, r1);
+        let [mut t0, mut t1] = self.net_forward(net, &lf);
+        // игра с нулевой суммой: взвешенные по диапазонам поправки двух игроков должны в сумме давать ноль
+        let err: f64 = t0.iter().zip(r0).map(|(t, r)| t * r / s0).sum::<f64>() + t1.iter().zip(r1).map(|(t, r)| t * r / s1).sum::<f64>();
+        for t in t0.iter_mut() {
+            *t -= err / 2.0;
+        }
+        for t in t1.iter_mut() {
+            *t -= err / 2.0;
+        }
+        let u0 = (0..t0.len()).map(|i| (t0[i] * s1 + lf.e[0][i]) * pot + pot / 2.0 * lf.m[0][i]).collect();
+        let u1 = (0..t1.len()).map(|i| (t1[i] * s0 + lf.e[1][i]) * pot + pot / 2.0 * lf.m[1][i]).collect();
+        (u0, u1)
     }
 
     /// Для каждой руки игрока `me`: суммарный вес рук оппонента, не пересекающихся с ней по картам.
@@ -359,6 +621,24 @@ impl Ctx {
                         let leaf = st.leaf_of[node];
                         self.chance(&mut st.kids[leaf], d, c[0], r0, r1, iter, upd)
                     }
+                    Next::Net(d) => {
+                        let leaf = st.leaf_of[node];
+                        if !st.kids[leaf].is_empty() {
+                            return self.chance(&mut st.kids[leaf], d, c[0], r0, r1, iter, upd);
+                        }
+                        let net = self.net.as_ref().expect("для листа с сетью не передана сеть");
+                        let (mut u0, mut u1) = self.net_leaf(net, d, &st.board, pot + 2.0 * c[0], st.tree.stack - c[0], r0, r1);
+                        // оценка считается от банка следующей улицы; переводим к началу этой
+                        let m0 = self.compat(0, r1);
+                        let m1 = self.compat(1, r0);
+                        for h in 0..u0.len() {
+                            u0[h] -= c[0] * m0[h];
+                        }
+                        for h in 0..u1.len() {
+                            u1[h] -= c[0] * m1[h];
+                        }
+                        (u0, u1)
+                    }
                 };
             }
             Kind::Decision => {}
@@ -414,7 +694,7 @@ impl Ctx {
                     let (r0, r1) = pair(r_opp);
                     pick(self.showdown(id, pot, nd.c[0], &r0, &r1))
                 }
-                Next::Deal(d) => {
+                Next::Deal(d) | Next::Net(d) => {
                     let deal = &self.deals[d];
                     let c = nd.c[0];
                     let kids = &st.kids[st.leaf_of[node]];
@@ -480,7 +760,7 @@ impl Ctx {
                 let (w, l, c) = (win[hand], lose[hand], comp[hand]);
                 (w + 0.5 * (c - w - l), c)
             }
-            Next::Deal(d) => {
+            Next::Deal(d) | Next::Net(d) => {
                 let deal = &self.deals[d];
                 let (mut num, mut den) = (0.0, 0.0);
                 for (i, &card) in deal.cards.iter().enumerate() {
@@ -513,10 +793,16 @@ fn strategy(st: &Store, node: usize, n_hands: usize, n_acts: usize, average: boo
 }
 
 fn to_next(x: i64) -> Next {
-    if x >= 0 { Next::Show(x as usize) } else { Next::Deal((-x - 1) as usize) }
+    if x >= 0 {
+        Next::Show(x as usize)
+    } else if x > -1000 {
+        Next::Deal((-x - 1) as usize)
+    } else {
+        Next::Net((-x - 1000) as usize)
+    }
 }
 
-type Answer = (Vec<(u8, f64, f64, f64)>, f64, Vec<f64>, Vec<f64>, Vec<f64>, f64, Vec<Vec<f64>>, Vec<Vec<f64>>);
+type Answer = (Vec<(u8, f64, f64, f64)>, f64, Vec<f64>, Vec<f64>, Vec<f64>, f64, Vec<Vec<f64>>, Vec<Vec<f64>>, Vec<f64>, Vec<f64>);
 
 /// Решить спот.
 ///
@@ -526,11 +812,17 @@ type Answer = (Vec<(u8, f64, f64, f64)>, f64, Vec<f64>, Vec<f64>, Vec<f64>, f64,
 /// - root_next: что происходит после торговли на текущей улице (в том же кодировании);
 /// - root_raises, deeper_sizes / deeper_raises: число рейзов подряд и размеры ставок на текущей и следующих улицах;
 /// - path: действия на текущей улице до нужного узла: (тип, сумма), типы 0 фолд, 1 чек, 2 колл, 3 ставка или рейз;
-/// - want_reach: вернуть только веса рук обоих игроков в узле после path (hero_* игнорируются).
+/// - want_reach: вернуть только веса рук обоих игроков в узле после path (hero_* игнорируются);
+/// - deal_next и root_next <= -1000: остаток раздачи оценивает сеть `net` (выход карты -x-1000 — для олл-инов);
+/// - board: карты борда текущей улицы (нужны сети); want_values: вернуть ценности всех рук в корне.
 ///
 /// Возвращает (действия героя: (тип, сумма, частота, EV), эквити героя, веса рук оппонента,
 /// веса рук игрока 0 в узле, веса рук игрока 1 в узле).
 #[pyfunction]
+#[pyo3(signature = (hands0, hands1, w0, w1, strengths0, strengths1, deal_cards, deal_next, deal_weight, root_next,
+                    pot, stack, sizes, root_raises, deeper_sizes, deeper_raises, raise_mult, extra_bet, oop_can_lead,
+                    iterations, hero_player, hero_index, path, want_reach, want_expl, want_all, alternate, board,
+                    want_values, net=None))]
 #[allow(clippy::too_many_arguments)]
 fn solve(
     py: Python<'_>,
@@ -561,6 +853,9 @@ fn solve(
     want_expl: bool,
     want_all: bool,
     alternate: bool,
+    board: Vec<u8>,
+    want_values: bool,
+    net: Option<PyRef<ValueNet>>,
 ) -> PyResult<Answer> {
     let n = [hands0.len(), hands1.len()];
     let hands = [hands0, hands1];
@@ -587,8 +882,13 @@ fn solve(
         .map(|((cards, next), weight)| Deal { cards, weight, next: next.into_iter().map(to_next).collect() })
         .collect();
     let deeper: Vec<StreetCfg> = deeper_sizes.into_iter().zip(deeper_raises).map(|(sizes, max_raises)| StreetCfg { sizes, max_raises }).collect();
-    let ctx = Ctx { hands, same, shows, deals, raise_mult, quadratic: alternate };
-    let mut root = ctx.make_street(pot, stack, &sizes, extra_bet, oop_can_lead, root_raises, to_next(root_next), &deeper);
+    let uses_net = root_next <= -1000 || deals.iter().any(|d| d.next.iter().any(|n| matches!(n, Next::Net(_))));
+    let net = net.map(|n| n.net.clone());
+    if uses_net && net.is_none() {
+        return Err(pyo3::exceptions::PyValueError::new_err("в раскладке есть листья с сетью, но сеть не передана"));
+    }
+    let ctx = Ctx { hands, same, shows, deals, raise_mult, quadratic: alternate, net };
+    let mut root = ctx.make_street(&board, pot, stack, &sizes, extra_bet, oop_can_lead, root_raises, to_next(root_next), &deeper);
 
     py.allow_threads(|| {
         for it in 1..=iterations {
@@ -603,7 +903,7 @@ fn solve(
 
     // эксплуатируемость: сколько в среднем теряет наша стратегия против лучшего ответа (в bb)
     let mut expl = -1.0;
-    if want_expl {
+    if want_expl && !uses_net {
         let br0 = ctx.best_response(&root, 0, 0, &w1);
         let br1 = ctx.best_response(&root, 0, 1, &w0);
         let pairs: f64 = ctx.compat(0, &w1).iter().zip(&w0).map(|(m, w)| m * w).sum();
@@ -612,6 +912,14 @@ fn solve(
             let v1: f64 = br1.iter().zip(&w1).map(|(v, w)| v * w).sum::<f64>() / pairs;
             expl = (v0 + v1 - pot) / 2.0;
         }
+    }
+
+    // ценности всех рук обоих игроков в корне при игре по средней стратегии
+    let (mut val0, mut val1) = (vec![], vec![]);
+    if want_values {
+        let (a, b) = ctx.cfr(&mut root, 0, &w0, &w1, 0, 2);
+        val0 = a;
+        val1 = b;
     }
 
     // идём по сыгранным действиям к нужному узлу
@@ -655,7 +963,7 @@ fn solve(
     }
     if want_reach {
         let [a, b] = reach;
-        return Ok((vec![], 0.0, vec![], a, b, expl, vec![], vec![]));
+        return Ok((vec![], 0.0, vec![], a, b, expl, vec![], vec![], val0, val1));
     }
     let nd = root.tree.nodes[node].clone();
     if nd.kind != Kind::Decision || nd.player != hero_player {
@@ -687,11 +995,56 @@ fn solve(
         .map(|(&h, r)| if has(h, hero_hand.0) || has(h, hero_hand.1) { 0.0 } else { *r })
         .collect();
     let [a, b] = reach;
-    Ok((actions, equity, weights, a, b, expl, all_freq, all_ev))
+    Ok((actions, equity, weights, a, b, expl, all_freq, all_ev, val0, val1))
+}
+
+/// Признаки листа для генератора обучающих данных — тот же расчёт, что внутри солвера.
+/// Возвращает (контекст, признаки рук игрока 0, признаки рук игрока 1, ценность без ставок для игроков 0 и 1).
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn leaf_features(
+    hands0: Vec<(u8, u8)>,
+    hands1: Vec<(u8, u8)>,
+    w0: Vec<f64>,
+    w1: Vec<f64>,
+    strengths0: Vec<Vec<u32>>,
+    strengths1: Vec<Vec<u32>>,
+    cards: Vec<u8>,
+    board: Vec<u8>,
+    pot: f64,
+    stack: f64,
+) -> PyResult<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f64>, Vec<f64>)> {
+    let n = [hands0.len(), hands1.len()];
+    let hands = [hands0, hands1];
+    let mut same: [Vec<Option<usize>>; 2] = [vec![None; n[0]], vec![None; n[1]]];
+    for (i, h) in hands[0].iter().enumerate() {
+        if let Some(j) = hands[1].iter().position(|g| (g.0 == h.0 && g.1 == h.1) || (g.0 == h.1 && g.1 == h.0)) {
+            same[0][i] = Some(j);
+            same[1][j] = Some(i);
+        }
+    }
+    let mut shows = Vec::with_capacity(strengths0.len());
+    for (s0, s1) in strengths0.into_iter().zip(strengths1) {
+        let strength = [s0, s1];
+        let mut order: [Vec<usize>; 2] = [(0..n[0]).collect(), (0..n[1]).collect()];
+        for p in 0..2 {
+            order[p].sort_by_key(|&h| strength[p][h]);
+        }
+        shows.push(Show { strength, order });
+    }
+    let next = (0..cards.len()).map(Next::Show).collect();
+    let weight = 1.0 / (52 - board.len() - 4) as f64;
+    let ctx = Ctx { hands, same, shows, deals: vec![Deal { cards, weight, next }], raise_mult: 3.0, quadratic: false, net: None };
+    let lf = ctx.leaf_features(0, &board, pot, stack, &w0, &w1);
+    let [f0, f1] = lf.f;
+    let [e0, e1] = lf.e;
+    Ok((lf.ctx, f0, f1, e0, e1))
 }
 
 #[pymodule]
 fn solver_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve, m)?)?;
+    m.add_class::<ValueNet>()?;
+    m.add_function(wrap_pyfunction!(leaf_features, m)?)?;
     Ok(())
 }
