@@ -1,18 +1,22 @@
 """Учебник для вкладки «Обучение»: главы в виде (заголовок, HTML)."""
 
-_CSS = """
+def _css(p) -> str:
+    """Стили учебника под текущую палитру (poker_coach.ui_theme.Palette)."""
+    return f"""
 <style>
-h2 { color:#ffd54f; margin-top:6px; }
-h3 { color:#81c784; margin-top:14px; }
-p, li { line-height:150%; }
-b { color:#ffffff; }
-table { border-collapse:collapse; margin:6px 0; }
-td, th { border:1px solid #3a4c5f; padding:4px 9px; }
-th { background:#263545; }
-.ex { background:#1f2b38; padding:8px 10px; margin:8px 0; }
-.term { color:#ffd54f; }
+body {{ color:{p.text}; font-size:15px; }}
+h2 {{ font-size:26px; font-weight:600; margin:0 0 10px 0; }}
+h3 {{ font-size:17px; font-weight:600; margin:22px 0 6px 0; }}
+p, li {{ line-height:150%; margin:0 0 10px 0; }}
+b {{ font-weight:600; }}
+table {{ border-collapse:collapse; margin:8px 0 14px 0; }}
+td, th {{ border-bottom:1px solid {p.separator}; padding:7px 14px 7px 0; text-align:left; }}
+th {{ color:{p.secondary}; font-weight:600; font-size:13px; }}
+.ex {{ background:{p.bg}; padding:12px 14px; margin:10px 0 14px 0; }}
+.term {{ color:{p.accent}; font-weight:600; }}
 </style>
 """
+
 
 CHAPTERS: list[tuple[str, str]] = [
     ("1. Правила и комбинации", """
@@ -369,5 +373,7 @@ CHAPTERS: list[tuple[str, str]] = [
 ]
 
 
-def html(index: int) -> str:
-    return _CSS + CHAPTERS[index][1]
+def html(index: int, palette=None) -> str:
+    if palette is None:
+        from .ui_theme import LIGHT as palette
+    return _css(palette) + CHAPTERS[index][1]
