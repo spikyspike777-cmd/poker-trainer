@@ -822,7 +822,7 @@ type Answer = (Vec<(u8, f64, f64, f64)>, f64, Vec<f64>, Vec<f64>, Vec<f64>, f64,
 #[pyo3(signature = (hands0, hands1, w0, w1, strengths0, strengths1, deal_cards, deal_next, deal_weight, root_next,
                     pot, stack, sizes, root_raises, deeper_sizes, deeper_raises, raise_mult, extra_bet, oop_can_lead,
                     iterations, hero_player, hero_index, path, want_reach, want_expl, want_all, alternate, board,
-                    want_values, net=None))]
+                    want_values, net=None, quadratic=None))]
 #[allow(clippy::too_many_arguments)]
 fn solve(
     py: Python<'_>,
@@ -856,6 +856,7 @@ fn solve(
     board: Vec<u8>,
     want_values: bool,
     net: Option<PyRef<ValueNet>>,
+    quadratic: Option<bool>,
 ) -> PyResult<Answer> {
     let n = [hands0.len(), hands1.len()];
     let hands = [hands0, hands1];
@@ -887,7 +888,7 @@ fn solve(
     if uses_net && net.is_none() {
         return Err(pyo3::exceptions::PyValueError::new_err("в раскладке есть листья с сетью, но сеть не передана"));
     }
-    let ctx = Ctx { hands, same, shows, deals, raise_mult, quadratic: alternate, net };
+    let ctx = Ctx { hands, same, shows, deals, raise_mult, quadratic: quadratic.unwrap_or(alternate), net };
     let mut root = ctx.make_street(&board, pot, stack, &sizes, extra_bet, oop_can_lead, root_raises, to_next(root_next), &deeper);
 
     py.allow_threads(|| {

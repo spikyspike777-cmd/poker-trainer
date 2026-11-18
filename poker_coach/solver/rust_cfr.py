@@ -62,6 +62,7 @@ class RustCFR:
         # Поочерёдные обновления игроков сходятся в 2–3 раза быстрее (ниже эксплуатируемость), но совпадение
         # с эталоном PokerBench с ними ниже (см. README), поэтому по умолчанию оба игрока обновляются за проход.
         self.alternate = False
+        self.quadratic = None      # усреднение итераций: None — квадратичное при поочерёдных обновлениях
         self.max_raises = max_raises                     # рейзов подряд на текущей улице (2 — можно ответить ре-рейзом; медленнее, прироста точности не дало)
         self._cache: dict = {}
 
@@ -125,7 +126,7 @@ class RustCFR:
                tuple(sorted(str(a) + str(b) for a, b in ranges[1])),
                tuple(round(w, 4) for w in weights[0]), tuple(round(w, 4) for w in weights[1]),
                round(pot, 2), round(stack, 2), round(extra, 2), lead, hero_p, hero_i, tuple(path), want_reach, want_expl, want_all, iters,
-               self.flop_cards, self.flop_sampling, self.flop_seed, self.alternate, net is not None,
+               self.flop_cards, self.flop_sampling, self.flop_seed, self.alternate, self.quadratic, net is not None,
                tuple(sizes), root_raise, str(deeper_sizes), tuple(deeper_raise))
         if key not in self._cache:
             if len(self._cache) > 200:
@@ -136,7 +137,7 @@ class RustCFR:
                 cards, nexts, dweights, root_next, float(pot), float(stack), sizes, root_raise,
                 deeper_sizes, deeper_raise, self.raise_mult, float(extra), lead, iters, hero_p, hero_i,
                 [(int(k), float(a)) for k, a in path], want_reach, want_expl, want_all, self.alternate,
-                [_idx(c) for c in board], False, net)
+                [_idx(c) for c in board], False, net, self.quadratic)
         return self._cache[key]
 
     # ---------- интерфейс ----------
